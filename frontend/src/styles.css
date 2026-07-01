@@ -1,0 +1,136 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@source "../src/**/*.{jsx,tsx,js,ts}";
+
+/* shadcn tokens, NON-inline so utilities emit var(--color-*) references,
+   which lets theme.js swap palettes at runtime by overriding these vars.
+   Defaults are Kanagawa; theme.js applies the saved theme on mount. */
+@theme {
+  --color-background: #1f1f28;
+  --color-foreground: #dcd7ba;
+  --color-card: #2a2a37;
+  --color-card-foreground: #dcd7ba;
+  --color-popover: #2a2a37;
+  --color-popover-foreground: #dcd7ba;
+  --color-primary: #7e9cd8;
+  --color-primary-foreground: #1f1f28;
+  --color-secondary: #16161d;
+  --color-secondary-foreground: #dcd7ba;
+  --color-muted: #16161d;
+  --color-muted-foreground: #938aa9;
+  --color-accent: #16161d;
+  --color-accent-foreground: #dcd7ba;
+  --color-destructive: #c34043;
+  --color-destructive-foreground: #dcd7ba;
+  --color-border: #52526e;
+  --color-input: #52526e;
+  --color-ring: #7e9cd8;
+  --color-warning: #e6c384;
+  --color-warning-foreground: #1f1f28;
+  --radius-xs: 0.25rem;
+  --radius-sm: calc(0.625rem - 4px);
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+}
+
+/* Tailwind v4 defaults bare `border` to currentColor; shadcn ships bare `border`,
+   so default it to the border token (matches the dashboard's subtle borders). */
+@layer base {
+  *,
+  ::after,
+  ::before {
+    @apply border-border;
+  }
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    margin: 0;
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .mono {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85em;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-muted-foreground);
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 4px 0;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 2px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: var(--color-muted-foreground);
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+    overflow: overlay;
+  }
+}
+
+/* Sticky table headers, the scroll container carries `.sticky-head`. */
+.sticky-head thead th {
+  position: sticky;
+  top: 0;
+  background: var(--color-card);
+  z-index: 2;
+}
+
+/* Card border, shadcn v4 cards ship a near-invisible `ring-foreground/10`.
+   Un-layered so it beats the ring utility; uses the theme border token. */
+[data-slot="card"] {
+  box-shadow: 0 0 0 1px var(--color-border);
+}
+.card-active[data-slot="card"] {
+  box-shadow: 0 0 0 1px var(--warning);
+}
+
+@keyframes heartbeat {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.5); opacity: 0.6; }
+}
+.heartbeat {
+  animation: heartbeat 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .heartbeat { animation: none; }
+}
+
+/* Hide native number-input spinners (shadcn-preact has no NumberField). */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
