@@ -126,6 +126,7 @@ export function buildModelBody(f) {
       upstream_name: r.upstream_name,
       upstream_model_id: r.upstream_model_id,
       sort_order: i,
+      enabled: r.enabled !== false,
     })),
   };
 }

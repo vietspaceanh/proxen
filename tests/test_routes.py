@@ -323,6 +323,29 @@ def test_all_upstreams_unavailable_returns_502(app_client):
     assert r.status_code == 502
 
 
+# ─── Disabled route skipped ─────────────────────────────────────────
+
+
+def test_disabled_route_is_skipped(app_client):
+    """A route with enabled=false is skipped at routing time (not attempted),
+    so a model whose only route is disabled returns 502 rather than 200."""
+    app_client.put(
+        "/api/management/models/gpt-test",
+        json={
+            "routes": [
+                {"upstream_name": "mock", "upstream_model_id": "gpt-test", "sort_order": 0, "enabled": False},
+            ],
+        },
+        headers=ADM,
+    )
+    r = app_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]},
+        headers=KEY,
+    )
+    assert r.status_code == 502
+
+
 # ─── WebSocket auth + origin ───────────────────────────────
 
 

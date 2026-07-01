@@ -191,7 +191,7 @@ class Management:
                 await self._db_upsert_proxen_model(pm)
                 for i, u in enumerate(self.upstreams):
                     await self._db.execute_commit(
-                        "INSERT OR IGNORE INTO model_routes (model_id, upstream_name, upstream_model_id, sort_order) VALUES (?,?,?,?)",
+                        "INSERT OR IGNORE INTO model_routes (model_id, upstream_name, upstream_model_id, sort_order, enabled) VALUES (?,?,?,?,1)",
                         (model_name, u.name, model_name, i),
                     )
             await self._load_proxen_models()
@@ -215,7 +215,7 @@ class Management:
         self.model_routes = {}
         for r in await cur.fetchall():
             self.model_routes.setdefault(r["model_id"], []).append(
-                ModelRoute(upstream_name=r["upstream_name"], upstream_model_id=r["upstream_model_id"], sort_order=r["sort_order"])
+                ModelRoute(upstream_name=r["upstream_name"], upstream_model_id=r["upstream_model_id"], sort_order=r["sort_order"], enabled=bool(r["enabled"]))
             )
 
     # ---- Upstreams ------------------------------------------------------
@@ -471,11 +471,11 @@ class Management:
             "DELETE FROM model_routes WHERE model_id = ?", (model_id,),
         )
         rows = [
-            (model_id, r["upstream_name"], r["upstream_model_id"], r.get("sort_order", 0))
+            (model_id, r["upstream_name"], r["upstream_model_id"], r.get("sort_order", 0), int(r.get("enabled", True)))
             for r in routes
         ]
         await self._db.executemany_commit(
-            "INSERT INTO model_routes (model_id, upstream_name, upstream_model_id, sort_order) VALUES (?,?,?,?)",
+            "INSERT INTO model_routes (model_id, upstream_name, upstream_model_id, sort_order, enabled) VALUES (?,?,?,?,?)",
             rows,
         )
 
@@ -568,7 +568,7 @@ class Management:
             )
             await self._db_upsert_proxen_model(pm, commit=False)
             await self._db.execute(
-                "INSERT INTO model_routes (model_id, upstream_name, upstream_model_id, sort_order) VALUES (?,?,?,?)",
+                "INSERT INTO model_routes (model_id, upstream_name, upstream_model_id, sort_order, enabled) VALUES (?,?,?,?,1)",
                 (proxen_id, upstream_name, mid, 0),
             )
             imported.append(proxen_id)

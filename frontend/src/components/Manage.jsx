@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
@@ -11,7 +11,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/t
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { api, randomKey, fmtAgo, fmtCompact, parseLimits, buildLimits, buildModelBody } from "../lib/format.js";
 import { toast } from "./ui/sonner";
-import { Wand2, ClipboardCopyIcon, CheckIcon, RefreshCw } from "lucide-react";
+import { Wand2, ClipboardCopyIcon, CheckIcon, RefreshCw, GripVertical } from "lucide-react";
 
 // ─── upstream model endpoints ─────────────────────────────────────────
 const getAvailableModels = (name) =>
@@ -72,17 +72,38 @@ function RateLimitsFields({ limits, onChange }) {
 
 // ─── Route editor ────────────────────────────────────────────────────
 
-function RouteEditor({ route, index, upstreams, availableModels, onProviderChange, onModelChange, onRemove, onFetch, fetching }) {
+function RouteEditor({ route, index, upstreams, availableModels, onProviderChange, onModelChange, onRemove, onToggle, onFetch, fetching, dragIndex, onDragStart, onDragOver, onDragEnd }) {
   const providerModels = availableModels[route.upstream_name] || [];
+  const canDrag = useRef(false);
   return (
-    <div className="border border-border rounded-lg p-3 mb-2">
+    <div
+      className={`border border-border rounded-lg p-3 mb-2 transition ${dragIndex === index ? "opacity-40" : ""}`}
+      data-route-key={route.rid}
+      draggable={route.enabled !== false}
+      onMouseDown={(e) => { canDrag.current = !!e.target.closest("[data-drag-handle]"); }}
+      onDragStart={(e) => { if (!canDrag.current) { e.preventDefault(); return; } onDragStart(e, index); }}
+      onDragOver={onDragOver}
+      onDragEnd={onDragEnd}
+    >
       <div className="flex items-center justify-between mb-2">
-        <span className="text-muted-foreground text-[0.72rem] font-medium uppercase tracking-wide">
-          #{index + 1} {index === 0 ? "(primary)" : "(fallback)"}
-        </span>
-        {index > 0 && <Button variant="ghost" size="xs" className="text-destructive" onClick={onRemove}>remove</Button>}
+        <div className="flex items-center gap-1.5">
+          {route.enabled !== false && (
+            <span data-drag-handle className="cursor-grab active:cursor-grabbing text-muted-foreground/50 hover:text-foreground">
+              <GripVertical className="size-3.5" />
+            </span>
+          )}
+          <span className="text-muted-foreground text-[0.72rem] font-medium uppercase tracking-wide">
+            #{index + 1} {index === 0 ? "(primary)" : route.enabled === false ? "(disabled)" : "(fallback)"}
+          </span>
+        </div>
+        {index > 0 && (
+          <div className="inline-flex border border-border rounded-md overflow-hidden shrink-0">
+            <Button variant="ghost" size="xs" onClick={onToggle}>{route.enabled === false ? "enable" : "disable"}</Button>
+            <Button variant="ghost" size="xs" className="text-destructive" onClick={onRemove}>remove</Button>
+          </div>
+        )}
       </div>
-      <div className="grid grid-cols-2 gap-2.5">
+      <div className={`grid grid-cols-2 gap-2.5 ${route.enabled === false ? "opacity-50" : ""}`}>
         <UIField>
           <FieldLabel>Provider</FieldLabel>
           <Select value={route.upstream_name || undefined} onValueChange={(v) => onProviderChange(index, v)}>
@@ -138,8 +159,8 @@ function ModelRow({ model, selected }) {
         </button>
       </TableCell>
       <TableCell className="mono font-medium">{model.id}</TableCell>
-      <TableCell className="text-[0.78rem]">{primary ? <Badge variant="outline" className="text-[0.68rem] font-normal whitespace-nowrap">{primary.upstream_name} / {primary.upstream_model_id}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
-      <TableCell className="text-[0.78rem] align-top">{fallbacks.length > 0 ? <div className="flex flex-wrap gap-1 max-h-[52px] overflow-y-auto scrollbar-thin">{fallbacks.map((r) => <Badge key={r.upstream_name + r.upstream_model_id} variant="outline" className="text-[0.68rem] font-normal shrink-0 whitespace-nowrap">{r.upstream_name} / {r.upstream_model_id}</Badge>)}</div> : <span className="text-muted-foreground">—</span>}</TableCell>
+      <TableCell className="text-[0.78rem]">{primary ? <Badge variant="outline" className={`text-[0.68rem] font-normal whitespace-nowrap ${primary.enabled === false ? "opacity-40 line-through" : ""}`}>{primary.upstream_name} / {primary.upstream_model_id}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
+      <TableCell className="text-[0.78rem] align-top">{fallbacks.length > 0 ? <div className="flex flex-wrap gap-1 max-h-[52px] overflow-y-auto scrollbar-thin">{fallbacks.map((r) => <Badge key={r.upstream_name + r.upstream_model_id} variant="outline" className={`text-[0.68rem] font-normal shrink-0 whitespace-nowrap ${r.enabled === false ? "opacity-40 line-through" : ""}`}>{r.upstream_name} / {r.upstream_model_id}</Badge>)}</div> : <span className="text-muted-foreground">—</span>}</TableCell>
       <TableCell>{fmtCompact(model.max_input_tokens)}</TableCell>
       <TableCell>{fmtCompact(model.max_output_tokens)}</TableCell>
       <TableCell>{model.input_per_1m != null ? "$" + model.input_per_1m : ""}</TableCell>
@@ -660,11 +681,14 @@ function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
   const [errors, setErrors] = useState({});
   const [routes, setRoutes] = useState(
     edit?.routes?.length
-      ? edit.routes.map((r) => ({ upstream_name: r.upstream_name, upstream_model_id: r.upstream_model_id }))
-      : [{ upstream_name: "", upstream_model_id: "" }]
+      ? edit.routes.map((r) => ({ upstream_name: r.upstream_name, upstream_model_id: r.upstream_model_id, rid: crypto.randomUUID(), enabled: r.enabled !== false }))
+      : [{ upstream_name: "", upstream_model_id: "", rid: crypto.randomUUID(), enabled: true }]
   );
   const [availableModels, setAvailableModels] = useState({});
   const [fetchingProvider, setFetchingProvider] = useState(null);
+  const [dragIndex, setDragIndex] = useState(null);
+  const containerRef = useRef(null);
+  const positionsRef = useRef({});
 
   const fetchAvailable = async (upstreamName) => {
     if (availableModels[upstreamName]) return;
@@ -691,6 +715,37 @@ function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
     }
   }, []);
 
+  const capturePositions = () => {
+    const container = containerRef.current;
+    if (!container) return;
+    const store = {};
+    container.querySelectorAll("[data-route-key]").forEach((el) => {
+      store[el.dataset.routeKey] = el.getBoundingClientRect().top;
+    });
+    positionsRef.current = store;
+  };
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const cards = container.querySelectorAll("[data-route-key]");
+    cards.forEach((el) => {
+      const first = positionsRef.current[el.dataset.routeKey];
+      if (first == null) return;
+      const last = el.getBoundingClientRect().top;
+      const delta = first - last;
+      if (!delta) return;
+      el.style.transition = "none";
+      el.style.transform = `translateY(${delta}px)`;
+    });
+    void container.offsetHeight;
+    cards.forEach((el) => {
+      el.style.transition = "";
+      el.style.transform = "";
+    });
+    positionsRef.current = {};
+  }, [routes]);
+
   const onProviderChange = (index, providerName) => {
     const newRoutes = [...routes];
     newRoutes[index] = { upstream_name: providerName, upstream_model_id: "" };
@@ -705,12 +760,36 @@ function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
   };
 
   const addFallback = () => {
-    setRoutes([...routes, { upstream_name: "", upstream_model_id: "" }]);
+    setRoutes([...routes, { upstream_name: "", upstream_model_id: "", rid: crypto.randomUUID(), enabled: true }]);
   };
 
   const removeRoute = (index) => {
     setRoutes(routes.filter((_, i) => i !== index));
   };
+
+  const toggleRoute = (index) => {
+    setRoutes((prev) => prev.map((r, i) => (i === index ? { ...r, enabled: !r.enabled } : r)));
+  };
+
+  const handleDragStart = (e, i) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", "");
+    setDragIndex(i);
+  };
+  const handleDragOver = (e, i) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragIndex === null || dragIndex === i) return;
+    capturePositions();
+    setRoutes((prev) => {
+      const next = [...prev];
+      const [moved] = next.splice(dragIndex, 1);
+      next.splice(i, 0, moved);
+      return next;
+    });
+    setDragIndex(i);
+  };
+  const handleDragEnd = () => setDragIndex(null);
 
   const save = () => {
     const e = {};
@@ -767,20 +846,27 @@ function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
       </UIField>
 
       <div className="text-muted-foreground text-[0.82rem] font-semibold uppercase tracking-wide mt-3">Upstream Routes</div>
-      {routes.map((r, i) => (
-        <RouteEditor
-          key={i}
-          route={r}
-          index={i}
-          upstreams={upstreams}
-          availableModels={availableModels}
-          onProviderChange={onProviderChange}
-          onModelChange={onModelChange}
-          onRemove={() => removeRoute(i)}
-          onFetch={fetchFromProvider}
-          fetching={fetchingProvider === r.upstream_name}
-        />
-      ))}
+      <div ref={containerRef}>
+        {routes.map((r, i) => (
+          <RouteEditor
+            key={r.rid}
+            route={r}
+            index={i}
+            upstreams={upstreams}
+            availableModels={availableModels}
+            onProviderChange={onProviderChange}
+            onModelChange={onModelChange}
+            onRemove={() => removeRoute(i)}
+            onToggle={() => toggleRoute(i)}
+            onFetch={fetchFromProvider}
+            fetching={fetchingProvider === r.upstream_name}
+            dragIndex={dragIndex}
+            onDragStart={(e) => handleDragStart(e, i)}
+            onDragOver={(e) => handleDragOver(e, i)}
+            onDragEnd={handleDragEnd}
+          />
+        ))}
+      </div>
       <Button variant="outline" size="sm" onClick={addFallback} className="w-full">+ Add Fallback</Button>
       {errors.routes && <FieldError>{errors.routes}</FieldError>}
 

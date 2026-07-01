@@ -71,6 +71,7 @@ class RouteIn(msgspec.Struct):
     upstream_name: str
     upstream_model_id: str
     sort_order: int = 0
+    enabled: bool = True
 
 
 class ImportModelsIn(msgspec.Struct):

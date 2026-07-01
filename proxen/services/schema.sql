@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS model_routes (
     upstream_name TEXT NOT NULL,
     upstream_model_id TEXT NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (model_id, upstream_name)
 );
 

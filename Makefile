@@ -18,9 +18,7 @@ test: ## Run the pytest suite
 lint: ## Run eslint on frontend/src
 	npm run lint
 
-install: ## Install dev (uv --extra dev) and frontend (npm) dependencies
-	uv sync --extra dev
-	npm install
+install: ## Install proxen as uv tool binary
 	uv run main.py build
 	uv tool install --force .
 

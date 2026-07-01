@@ -425,6 +425,8 @@ class Proxy:
         last_retryable_upstream: str = ""
 
         for route in routes:
+            if not route.enabled:
+                continue
             upstream = self._catalog.get_upstream(route.upstream_name)
             if upstream is None or not upstream.enabled:
                 continue

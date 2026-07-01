@@ -190,12 +190,14 @@ class ModelRoute:
     upstream_name: str
     upstream_model_id: str
     sort_order: int = 0
+    enabled: bool = True
 
     def to_dict(self) -> dict:
         return {
             "upstream_name": self.upstream_name,
             "upstream_model_id": self.upstream_model_id,
             "sort_order": self.sort_order,
+            "enabled": self.enabled,
         }
 
 
