@@ -3,6 +3,7 @@
 Usage:
   make dev      # or: uv run main.py            vite (:1313, HMR) + proxen (:1212, .py auto-restart)
   make build    # or: uv run main.py build      generate minified build into proxen/dashboard/
+  make lint     # or: uv run main.py lint       run eslint on frontend/src
   make publish  # or: uv run main.py publish    build + uv build + uv publish
 
 Vite dev server on :1313 proxies API/WebSocket to proxen on :1212.
@@ -49,20 +50,27 @@ _PDEATH_WRAPPER = (
 # ─── node / vite helpers ───────────────────────────────────────────
 
 
+def _pkg_manager() -> str:
+    """Resolve the JS package manager, preferring bun."""
+    for pm in ("bun", "npm", "pnpm", "yarn"):
+        if shutil.which(pm):
+            return pm
+    sys.exit("error: no JS package manager (bun/npm/pnpm/yarn) on PATH.")
+
+
 def _ensure_node_deps() -> None:
-    """Run `npm install` if the frontend toolchain isn't present."""
+    """Install node deps if the frontend toolchain isn't present."""
     if (NODE_BIN / "vite").exists():
         return
-    if shutil.which("npm") is None:
-        sys.exit("error: npm not found on PATH — install Node.js first.")
-    print("[npm] install (node_modules missing)", flush=True)
-    subprocess.run(["npm", "install"], cwd=ROOT, check=True)
+    pm = _pkg_manager()
+    print(f"[{pm}] install (node_modules missing)", flush=True)
+    subprocess.run([pm, "install"], cwd=ROOT, check=True)
 
 
 def _bin(name: str) -> str:
     local = NODE_BIN / name
     if not local.exists():
-        sys.exit(f"error: '{name}' not found at {local}\n       run `npm install` first.")
+        sys.exit(f"error: '{name}' not found at {local}\n       run `make build` to install node deps first.")
     return str(local)
 
 
@@ -202,6 +210,15 @@ def publish() -> None:
     print("\ndone.")
 
 
+# ─── lint ─────────────────────────────────────────────────────────
+
+
+def lint() -> None:
+    _ensure_node_deps()
+    print("[eslint] frontend/src", flush=True)
+    subprocess.run([_bin("eslint"), "frontend/src"], cwd=ROOT, check=True)
+
+
 # ─── entrypoint ────────────────────────────────────────────────────
 
 
@@ -210,10 +227,13 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("build", help="generate minified production build (no server)")
     sub.add_parser("dev", help="watch + proxen with auto-restart (default)")
+    sub.add_parser("lint", help="run eslint on frontend/src")
     sub.add_parser("publish", help="build + uv build + uv publish")
     args = parser.parse_args()
     if args.cmd == "build":
         build_prod()
+    elif args.cmd == "lint":
+        lint()
     elif args.cmd == "publish":
         publish()
     else:

@@ -9,14 +9,14 @@ dev: ## Vite dev server (:1313) + proxen (:1212) with .py auto-restart
 build: ## One-shot minified production build into proxen/dashboard/
 	uv run main.py build
 
-publish: ## npm install + build + uv build + uv publish
+publish: ## install + build + uv build + uv publish
 	uv run main.py publish
 
 test: ## Run the pytest suite
 	uv run pytest
 
 lint: ## Run eslint on frontend/src
-	npm run lint
+	uv run main.py lint
 
 install: ## Install proxen as uv tool binary
 	uv run main.py build
