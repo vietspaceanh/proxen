@@ -116,7 +116,7 @@ function RouteEditor({ route, index, upstreams, availableModels, onProviderChang
         <UIField>
           <FieldLabel>Upstream Model ID</FieldLabel>
           <div className="flex gap-1.5">
-            <Select value={route.upstream_model_id || undefined} onValueChange={(v) => onModelChange(index, v)} disabled={!route.upstream_name}>
+            <Select key={route.upstream_name} value={route.upstream_model_id || undefined} onValueChange={(v) => onModelChange(index, v)} disabled={!route.upstream_name}>
               <SelectTrigger className="flex-1"><SelectValue placeholder={route.upstream_name ? "select model" : "select provider first"}>{route.upstream_model_id}</SelectValue></SelectTrigger>
               <SelectContent position="popper">
                 {providerModels.map((m) => <SelectItem key={m.id} value={m.id}>{m.id}</SelectItem>)}
@@ -747,9 +747,9 @@ function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
   }, [routes]);
 
   const onProviderChange = (index, providerName) => {
-    const newRoutes = [...routes];
-    newRoutes[index] = { upstream_name: providerName, upstream_model_id: "" };
-    setRoutes(newRoutes);
+    setRoutes((prev) => prev.map((r, i) =>
+      i === index ? { ...r, upstream_name: providerName, upstream_model_id: "" } : r
+    ));
     fetchAvailable(providerName);
   };
 
