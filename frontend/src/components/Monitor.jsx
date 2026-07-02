@@ -49,8 +49,12 @@ function StatusBadge({ status, dropped, review }) {
   if (!status) return <Badge variant="outline">ERR</Badge>;
   if (dropped)
     return (
-      <Badge variant="outline" style={{ color: "var(--warning)", borderColor: "var(--warning)" }}>
-        200 dropped
+      <Badge
+        variant="outline"
+        style={{ color: "var(--orange)", borderColor: "var(--orange)" }}
+        title={`upstream returned ${status} but closed the stream before completion`}
+      >
+        upstream dropped
       </Badge>
     );
   const color = status >= 500 ? "var(--danger)" : status >= 400 ? "var(--orange)" : "var(--success)";
@@ -250,7 +254,7 @@ function MonitorImpl({ stats, theme }) {
                   const indColor = rec.client_disconnect
                     ? "var(--text-muted)"
                     : rec.upstream_dropped
-                      ? "var(--warning)"
+                      ? "var(--orange)"
                       : statusColor(status);
                   return (
                     <TableRow key={rec.id || `r-${rec.timestamp}-${i}`}>
