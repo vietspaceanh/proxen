@@ -77,12 +77,14 @@ _ROW_GEN_MS = (
 # duration, streaming rows their (floored) generation phase. Unlike AVG(tps),
 # this is true throughput -- invariant to the traffic mix of short vs long
 # responses -- and is robust to individual outlier rows.
-_WEIGHTED_TPS = (
-    "COALESCE("
+# Raw weighted throughput (NULL when no row has a measurable rate, e.g. an
+# all-burst bucket). Used by the time-series chart to surface "no data" rather
+# than an inaccurate 0.
+_WEIGHTED_TPS_CORE = (
     f"SUM(CASE WHEN r.tps_centi > 0 THEN r.output_tokens END) * 1000.0 / "
     f"NULLIF(SUM(CASE WHEN r.tps_centi > 0 THEN {_ROW_GEN_MS} END), 0)"
-    ", 0)"
 )
+_WEIGHTED_TPS = f"COALESCE({_WEIGHTED_TPS_CORE}, 0)"
 
 
 class Database:
@@ -241,13 +243,15 @@ class Database:
         # at most 15 min stale (vs up to 60 min with hourly buckets).
         rows = await self._since(
             f"""SELECT CAST(r.timestamp / 900 AS INTEGER) * 900 AS bucket,
-                      {_WEIGHTED_TPS} AS tps,
+                      {_WEIGHTED_TPS_CORE} AS tps,
                       AVG(r.ttft_ms) / 1000.0 AS ttft
                FROM requests r WHERE r.timestamp >= ? AND r.status < 400
                GROUP BY bucket ORDER BY bucket ASC""",
             1,
         )
-        return [{"timestamp": r["bucket"], "tps": r["tps"] or 0, "ttft": r["ttft"] or 0} for r in rows]
+        # tps stays NULL for all-burst buckets (no measurable rate) so the
+        # chart bridges them instead of dropping to 0; ttft is always defined.
+        return [{"timestamp": r["bucket"], "tps": r["tps"], "ttft": r["ttft"] or 0} for r in rows]
 
     async def daily_tokens(self, days: int = 7) -> list[dict]:
         return await self._since(

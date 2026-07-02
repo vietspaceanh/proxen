@@ -101,7 +101,7 @@ function buildTpsChart(stats, theme) {
     data: {
       labels: ttft.map((r) => fmtHour(r.timestamp)),
       datasets: [
-        { label: "TPS", data: ttft.map((r) => r.tps), borderColor: accent, backgroundColor: accent + "22", yAxisID: "y", tension: 0.3, pointRadius: 0, borderWidth: 2 },
+        { label: "TPS", data: ttft.map((r) => r.tps), borderColor: accent, backgroundColor: accent + "22", yAxisID: "y", tension: 0.3, pointRadius: 0, borderWidth: 2, spanGaps: true },
         { label: "TTFT (s)", data: ttft.map((r) => r.ttft), borderColor: accent2, backgroundColor: accent2 + "22", yAxisID: "y1", tension: 0.3, pointRadius: 0, borderWidth: 2 },
       ],
     },
