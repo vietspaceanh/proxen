@@ -54,7 +54,7 @@ function StatusBadge({ status, dropped, review }) {
         style={{ color: "var(--orange)", borderColor: "var(--orange)" }}
         title={`upstream returned ${status} but closed the stream before completion`}
       >
-        upstream dropped
+        dropped
       </Badge>
     );
   const color = status >= 500 ? "var(--danger)" : status >= 400 ? "var(--orange)" : "var(--success)";
