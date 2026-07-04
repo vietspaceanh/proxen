@@ -10,6 +10,7 @@ Verifies that client disconnect during streaming:
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -281,3 +282,224 @@ async def test_upstream_error_not_disconnected():
             pass
 
     upstream_mgr.record_upstream_failure.assert_called_once_with("mock")
+
+
+# ─── Receiving-phase disconnect recording ───────────────────────────
+
+
+class _StalledContent:
+    """readany() blocks forever (upstream never sends the first byte)."""
+
+    async def readany(self):
+        await asyncio.Event().wait()
+        return b""  # pragma: no cover
+
+    def iter_any(self):
+        async def _g():
+            return
+            yield  # pragma: no cover
+
+        return _g()
+
+
+def _call_forward_simple(proxy, disconnect, *, body=b'{"model":"gpt-test"}'):
+    slot = InflightSlot(key_id="key-1")
+    return proxy.forward_simple(
+        raw_headers=[],
+        path="/v1/chat/completions",
+        query="",
+        body=body,
+        model="gpt-test",
+        key_id="key-1",
+        slot=slot,
+        disconnect=disconnect,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ttft_race_disconnect_records_cancelled():
+    """Receiving-phase disconnect during the TTFT wait (headers received,
+    no first byte yet) is recorded as a client disconnect, not dropped."""
+    resp = MagicMock(spec=aiohttp.ClientResponse)
+    resp.status = 200
+    resp.headers = {"content-type": "text/event-stream"}
+    resp.content = _StalledContent()
+    resp.release = MagicMock()
+    resp.close = MagicMock()
+
+    proxy, upstream_mgr, sink, _ = _make_proxy(resp)
+
+    disconnect = asyncio.Event()
+    asyncio.create_task(_delayed_disconnect(disconnect, 0.1))
+    watcher = asyncio.create_task(
+        watch_disconnect(_BlockingReceive().receive, disconnect)
+    )
+
+    result = await _call_forward_stream(proxy, disconnect, watcher)
+    assert result is None
+
+    watcher.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await watcher
+
+    sink.enqueue.assert_called_once()
+    record = sink.enqueue.call_args.args[0]
+    assert record.client_disconnect is True
+    assert record.status == 200
+    assert record.stream is True
+    upstream_mgr.release_provider.assert_called_with("mock")
+
+
+@pytest.mark.asyncio
+async def test_post_race_disconnect_not_recorded():
+    """Requesting-phase disconnect (POST not yet resolved) is NOT recorded."""
+
+    async def _blocking_post(*args, **kwargs):
+        await asyncio.Event().wait()
+        return MagicMock(spec=aiohttp.ClientResponse)  # pragma: no cover
+
+    proxy, upstream_mgr, sink, _ = _make_proxy(MagicMock(spec=aiohttp.ClientResponse))
+    upstream_mgr.post = AsyncMock(side_effect=_blocking_post)
+
+    disconnect = asyncio.Event()
+    asyncio.create_task(_delayed_disconnect(disconnect, 0.1))
+    watcher = asyncio.create_task(
+        watch_disconnect(_BlockingReceive().receive, disconnect)
+    )
+
+    result = await _call_forward_stream(proxy, disconnect, watcher)
+    assert result is None
+
+    watcher.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await watcher
+
+    sink.enqueue.assert_not_called()
+    upstream_mgr.release_provider.assert_called_with("mock")
+
+
+@pytest.mark.asyncio
+async def test_simple_read_race_disconnect_records_cancelled():
+    """Non-streaming receiving-phase disconnect (during body read) is recorded."""
+
+    async def _blocking_read():
+        await asyncio.Event().wait()
+        return b""  # pragma: no cover
+
+    resp = MagicMock(spec=aiohttp.ClientResponse)
+    resp.status = 200
+    resp.headers = {"content-type": "application/json"}
+    resp.read = _blocking_read
+    resp.release = MagicMock()
+    resp.close = MagicMock()
+
+    proxy, upstream_mgr, sink, _ = _make_proxy(resp)
+
+    disconnect = asyncio.Event()
+    asyncio.create_task(_delayed_disconnect(disconnect, 0.1))
+
+    result = await _call_forward_simple(proxy, disconnect)
+    assert result is None
+
+    sink.enqueue.assert_called_once()
+    record = sink.enqueue.call_args.args[0]
+    assert record.client_disconnect is True
+    assert record.status == 200
+    assert record.stream is False
+    upstream_mgr.release_provider.assert_called_with("mock")
+
+
+# ─── In-flight TTFT surfacing ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_streaming_sets_slot_ttft():
+    """The slot's ttft is populated once the first byte streams."""
+    chunks_data = [
+        b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+        b'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n',
+        b'data: [DONE]\n\n',
+    ]
+    resp = _FakeUpstreamResponse(chunks=chunks_data)
+    proxy, _, _, _ = _make_proxy(resp)
+
+    disconnect = asyncio.Event()
+    watcher = asyncio.create_task(
+        watch_disconnect(_BlockingReceive().receive, disconnect)
+    )
+    slot = InflightSlot(key_id="key-1")
+
+    result = await proxy.forward_stream(
+        raw_headers=[], path="/v1/chat/completions", query="",
+        body=b'{"model":"gpt-test","stream":true}', model="gpt-test",
+        key_id="key-1", slot=slot, gate=MagicMock(),
+        disconnect=disconnect, watcher=watcher,
+    )
+    _, _, stream_gen = result
+
+    async for _ in stream_gen():
+        pass
+
+    assert slot.ttft > 0.0
+    assert slot.phase == "receiving"
+
+
+@pytest.mark.asyncio
+async def test_inflight_snapshot_includes_ttft():
+    from proxen.core.gate import ConcurrencyGate
+
+    gate = ConcurrencyGate(max_inflight=5, max_waiting=10, timeout=10.0)
+    slot = await gate.acquire("key-1")
+    slot.model = "gpt-test"
+    slot.upstream = "mock"
+    slot.ttft = 0.456
+    slot.phase = "receiving"
+
+    snap = gate.snapshot()
+    assert len(snap.inflight) == 1
+    row = snap.inflight[0]
+    assert row["ttft"] == 0.456
+    assert row["phase"] == "receiving"
+
+    gate.release(slot)
+    assert len(gate.snapshot().inflight) == 0
+
+
+@pytest.mark.asyncio
+async def test_phase_change_notifies_gate():
+    """The requesting->receiving transition and the first-byte TTFT each
+    trigger a dashboard push via the slot's notify callback."""
+    from proxen.core.gate import ConcurrencyGate
+
+    chunks_data = [
+        b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+        b'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n',
+        b'data: [DONE]\n\n',
+    ]
+    resp = _FakeUpstreamResponse(chunks=chunks_data)
+    proxy, _, _, _ = _make_proxy(resp)
+
+    gate = ConcurrencyGate(max_inflight=5, max_waiting=10, timeout=10.0)
+    notifies = []
+    gate.set_on_change(lambda: notifies.append(1))
+
+    slot = await gate.acquire("key-1")
+    disconnect = asyncio.Event()
+    watcher = asyncio.create_task(
+        watch_disconnect(_BlockingReceive().receive, disconnect)
+    )
+
+    result = await proxy.forward_stream(
+        raw_headers=[], path="/v1/chat/completions", query="",
+        body=b'{"model":"gpt-test","stream":true}', model="gpt-test",
+        key_id="key-1", slot=slot, gate=gate,
+        disconnect=disconnect, watcher=watcher,
+    )
+    _, _, stream_gen = result
+    async for _ in stream_gen():
+        pass
+
+    assert slot.phase == "receiving"
+    assert slot.ttft > 0.0
+    # acquire + phase-transition + first-byte TTFT (release may add one more)
+    assert len(notifies) >= 3

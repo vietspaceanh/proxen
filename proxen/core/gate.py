@@ -160,6 +160,15 @@ class InflightSlot:
     so the dashboard can compute elapsed time client-side without periodic
     server pushes.
 
+    `phase` tracks the request lifecycle for the dashboard: `"requesting"`
+    (POST sent, no upstream response yet) -> `"receiving"` (upstream response
+    obtained, body in progress).  `ttft` is populated once the first byte
+    streams.
+
+    `_notify_cb` is set by the gate at acquisition so the proxy can trigger a
+    dashboard push when a slot field changes mid-flight, without holding a
+    gate reference (e.g. from `forward_simple`).
+
     `_idle_handle` / `_idle_notified` are managed by the gate's idle
     watch.  `_released` makes `ConcurrencyGate.release` idempotent.
     """
@@ -171,9 +180,28 @@ class InflightSlot:
     output_tokens: int = 0
     last_byte_time: float = 0.0  # monotonic timestamp of last received chunk
     wall_start: float = 0.0  # epoch timestamp at acquisition (for dashboard)
+    ttft: float = 0.0  # seconds to first byte; 0.0 = first byte not yet received
+    phase: str = "requesting"  # "requesting" -> "receiving" once response obtained
     _released: bool = field(default=False)
     _idle_handle: asyncio.TimerHandle | None = field(default=None, repr=False)
     _idle_notified: bool = field(default=False, repr=False)
+    _notify_cb: Callable[[], None] | None = field(default=None, repr=False)
+
+    def notify(self) -> None:
+        """Trigger a dashboard push for this slot's current state."""
+        cb = self._notify_cb
+        if cb is not None:
+            cb()
+
+    def mark_receiving(self) -> None:
+        """Transition to the ``receiving`` phase and push an update."""
+        self.phase = "receiving"
+        self.notify()
+
+    def record_ttft(self, ttft: float) -> None:
+        """Record time-to-first-byte and push an update."""
+        self.ttft = ttft
+        self.notify()
 
 
 @dataclass
@@ -408,6 +436,7 @@ class ConcurrencyGate:
         if self._active < self._max_inflight:
             self._active += 1
             slot = InflightSlot(key_id=key_id, wall_start=time.time())
+            slot._notify_cb = self._notify
             self.inflight[id(slot)] = slot
             self._schedule_idle_check(slot)
             self._notify()
@@ -432,6 +461,7 @@ class ConcurrencyGate:
         # injected between `wait_for` returning and the slot being
         # registered.  Dict assignment and `_notify` are both sync.
         slot = InflightSlot(key_id=key_id, wall_start=time.time())
+        slot._notify_cb = self._notify
         self.inflight[id(slot)] = slot
         self._schedule_idle_check(slot)
         self._notify()
@@ -495,6 +525,8 @@ class ConcurrencyGate:
                 "started_at": int(s.wall_start * 1000),
                 "key_id": s.key_id,
                 "no_signal": s._idle_notified,
+                "ttft": s.ttft,
+                "phase": s.phase,
             }
             for s in self.inflight.values()
         ]

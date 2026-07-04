@@ -339,6 +339,19 @@ class Proxy:
             stream=stream, completed=True,
         )
 
+    def _cancel_telemetry(
+        self, wall_start: float, wall_perf: float, model: str, key_id: str,
+        upstream: str, status: int, *, stream: bool,
+    ) -> None:
+        """Record a receiving-phase client disconnect (status already known)."""
+        self.record_telemetry(
+            wall_start=wall_start, model=model or "unknown",
+            upstream=upstream, key_id=key_id, ttft=0.0, tps=0.0,
+            usage=UsageStats(), status=status,
+            duration=time.perf_counter() - wall_perf,
+            stream=stream, disconnected=True, completed=False,
+        )
+
     # ── Shared helpers ────────────────────────────────────────────────
 
     def _upstream_url(self, upstream, path: str, query: str) -> str:
@@ -520,6 +533,11 @@ class Proxy:
                             await read_task
                     self.upstream_mgr.release_provider(upstream.name)
                     self._release_held(last_retryable_resp, last_retryable_upstream)
+                    if slot is not None:
+                        self._cancel_telemetry(
+                            slot.wall_start, start, slot.model, slot.key_id,
+                            upstream.name, resp.status, stream=True,
+                        )
                     return None
 
                 try:
@@ -553,10 +571,14 @@ class Proxy:
             # ── Route succeeded ────────────────────────────────────
             self.upstream_mgr.record_upstream_success(upstream.name)
             self._release_held(last_retryable_resp, last_retryable_upstream)
+            if slot is not None:
+                slot.mark_receiving()
             return resp, upstream.name, start, first_chunk
 
         # All routes exhausted
         if last_retryable_resp is not None:
+            if slot is not None:
+                slot.mark_receiving()
             return last_retryable_resp, last_retryable_upstream, start, b""
 
         message = (
@@ -664,6 +686,8 @@ class Proxy:
                 if _first_chunk:
                     if ttft is None:
                         ttft = time.perf_counter() - _start
+                        if _slot:
+                            _slot.record_ttft(ttft)
                     parser.feed(_first_chunk)
                     if _slot:
                         _slot.last_byte_time = time.monotonic()
@@ -674,6 +698,8 @@ class Proxy:
                 async for chunk in _resp.content.iter_any():
                     if ttft is None:
                         ttft = time.perf_counter() - _start
+                        if _slot:
+                            _slot.record_ttft(ttft)
                     parser.feed(chunk)
                     if _slot:
                         _slot.last_byte_time = time.monotonic()
@@ -774,6 +800,10 @@ class Proxy:
             with suppress(Exception):
                 resp.close()
             self.upstream_mgr.release_provider(upstream_name)
+            self._cancel_telemetry(
+                wall_start, start, model, key_id,
+                upstream_name, resp.status, stream=False,
+            )
             return None
 
         try:

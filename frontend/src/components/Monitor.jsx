@@ -65,12 +65,21 @@ function StatusBadge({ status, dropped, review }) {
   );
 }
 
-function ElapsedBadge({ now, startedAt, noSignal }) {
+function ElapsedBadge({ now, startedAt, noSignal, ttft, phase }) {
   const [start] = useState(() => startedAt || now);
   const elapsed = Math.floor(Math.max(0, now - start) / 1000);
-  if (noSignal)
-    return <Badge variant="outline" style={{ color: "var(--danger)", borderColor: "var(--danger)" }}>no signal {elapsed}s</Badge>;
-  return <Badge style={{ background: "var(--warning)", color: "var(--bg)" }}>in-flight {elapsed}s</Badge>;
+  const t = fmtTTFT(ttft);
+  const receiving = phase === "receiving";
+  const statusBadge = noSignal
+    ? <Badge variant="outline" style={{ color: "var(--danger)", borderColor: "var(--danger)" }}>no signal {elapsed}s</Badge>
+    : <Badge variant="outline" style={{ color: "var(--warning)", borderColor: "var(--warning)" }}>{receiving ? "receiving" : "requesting"} {elapsed}s</Badge>;
+  if (!t) return statusBadge;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {statusBadge}
+      <Badge variant="outline" style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>ttft: {t}</Badge>
+    </span>
+  );
 }
 
 function InflightRow({ req, keyMap, now }) {
@@ -78,10 +87,10 @@ function InflightRow({ req, keyMap, now }) {
   return (
     <TableRow className="bg-[--warning]/5 hover:bg-[--warning]/10">
       <TableCell className="w-[3px] p-0" style={{ background: noSignal ? "var(--danger)" : "var(--warning)" }} />
-      <TableCell />
+      <TableCell className="text-muted-foreground tabular-nums text-[0.78rem] whitespace-nowrap">{fmtTime(req.started_at / 1000)}</TableCell>
       <TableCell className="mono"><span className="inline-flex items-center gap-1.5 max-w-[240px]">{req.upstream && <Badge variant="outline" className="h-auto px-1 py-px text-[0.62rem] uppercase tracking-wide text-muted-foreground">{req.upstream}</Badge>}<span className="truncate" title={req.model || ""}>{req.model || ""}</span></span></TableCell>
       <TableCell colSpan={4}>
-        <ElapsedBadge now={now} startedAt={req.started_at} noSignal={noSignal} />
+        <ElapsedBadge now={now} startedAt={req.started_at} noSignal={noSignal} ttft={req.ttft} phase={req.phase} />
       </TableCell>
       <TableCell className="mono text-muted-foreground">{resolveUser(req.key_id, keyMap)}</TableCell>
     </TableRow>
