@@ -610,20 +610,20 @@ class Proxy:
             routes, body_or_payload, protocol = self._prepare_request(
                 body, model, path,
             )
+            if slot:
+                slot.model = model
+
+            ttft_timeout = self.settings.upstream_ttft_timeout or None
+            result = await self._try_routes(
+                raw_headers, path, query, body_or_payload, routes, model,
+                protocol, slot, disconnect, ttft_timeout=ttft_timeout,
+            )
         except ProxyError as exc:
             self._error_telemetry(
                 wall_start, wall_perf, model, key_id,
                 exc.upstream, exc.status, stream=True,
             )
             raise
-        if slot:
-            slot.model = model
-
-        ttft_timeout = self.settings.upstream_ttft_timeout or None
-        result = await self._try_routes(
-            raw_headers, path, query, body_or_payload, routes, model,
-            protocol, slot, disconnect, ttft_timeout=ttft_timeout,
-        )
         if result is None:
             return None
 
@@ -772,19 +772,19 @@ class Proxy:
             routes, body_or_payload, protocol = self._prepare_request(
                 body, model, path,
             )
+            if slot:
+                slot.model = model
+
+            result = await self._try_routes(
+                raw_headers, path, query, body_or_payload, routes, model,
+                protocol, slot, disconnect, simple_timeout=_SIMPLE_TIMEOUT,
+            )
         except ProxyError as exc:
             self._error_telemetry(
                 wall_start, wall_perf, model, key_id,
                 exc.upstream, exc.status, stream=False,
             )
             raise
-        if slot:
-            slot.model = model
-
-        result = await self._try_routes(
-            raw_headers, path, query, body_or_payload, routes, model,
-            protocol, slot, disconnect, simple_timeout=_SIMPLE_TIMEOUT,
-        )
         if result is None:
             return None
 
