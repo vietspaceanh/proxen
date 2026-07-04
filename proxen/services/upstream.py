@@ -64,8 +64,10 @@ class UpstreamManager:
 
     def release_provider(self, name: str) -> None:
         current = self._provider_inflight.get(name, 0)
-        if current > 0:
-            self._provider_inflight[name] = current - 1
+        if current <= 0:
+            log.warning("release_provider underflow for %s (current=%d)", name, current)
+            return
+        self._provider_inflight[name] = current - 1
 
     def provider_inflight(self) -> dict[str, int]:
         return dict(self._provider_inflight)

@@ -76,7 +76,7 @@ class SSEUsageParser:
     Anthropic: input tokens arrive in the first event (`message_start`)
     and output tokens in the last (`message_delta`), so a small head
     buffer keeps the former and the tail buffer keeps the latter. Only at
-    `finalize` are the relevant data lines parsed — no per-chunk JSON.
+    `finalize` are the relevant data lines parsed - no per-chunk JSON.
     """
 
     _TAIL = 8192  # usage always in the last chunk; 8 KB is generous

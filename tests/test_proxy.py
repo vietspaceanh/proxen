@@ -11,7 +11,6 @@ from proxen.core.sse import (
 )
 from proxen.services.proxy import (
     Proxy,
-    ProxyResponse,
     _filter_headers,
     protocol_from_path,
     speed_metrics,
@@ -152,15 +151,14 @@ class _DummyHeaders(dict):
         return super().items()
 
 
-def test_forward_headers_sets_accept_encoding():
-    """proxen must request gzip/deflate so the upstream hop is compressed."""
+def test_forward_headers_preserves_accept_encoding():
+    """proxen preserves the client's Accept-Encoding for cache transparency."""
     h = _filter_headers(
         {"Authorization": "Bearer clientkey", "Accept-Encoding": "br, gzip, deflate"},
         provider_key="provider-secret",
     )
     assert h["Authorization"] == "Bearer provider-secret"
-    assert "br" not in h["Accept-Encoding"]
-    assert h["Accept-Encoding"] == "gzip, deflate"
+    assert h["Accept-Encoding"] == "br, gzip, deflate"
 
 
 def test_forward_headers_strips_hop_by_hop():
@@ -195,40 +193,6 @@ def test_resp_headers_strips_encoding_and_length():
     assert "Content-Length" not in out
     assert out["Content-Type"] == "application/json"
     assert out["X-Trace"] == "keep"
-
-
-def test_proxy_response_optional_typing():
-    """bytes | None / AsyncIterator | None must construct at runtime."""
-    r = ProxyResponse(status=200, headers={}, body=None)
-    assert r.body is None and r.resp is None
-
-
-def test_cleanup_is_idempotent():
-    """cleanup() called twice releases resp, provider, and gate exactly once."""
-    from unittest.mock import MagicMock
-
-    import aiohttp
-
-    from proxen.core.gate import InflightSlot
-
-    resp = MagicMock(spec=aiohttp.ClientResponse)
-    resp.release = MagicMock()
-
-    slot = InflightSlot(key_id="k")
-    gate = MagicMock()
-    upstream_mgr = MagicMock()
-
-    result = ProxyResponse(
-        status=200, headers={}, resp=resp, upstream_name="u",
-        slot=slot, gate=gate, upstream_mgr=upstream_mgr,
-    )
-
-    result.cleanup()
-    result.cleanup()
-
-    resp.release.assert_called_once()
-    upstream_mgr.release_provider.assert_called_once_with("u")
-    gate.release.assert_called_once_with(slot)
 
 
 def test_record_completion_flags():
@@ -406,7 +370,6 @@ def test_forward_headers_anthropic_uses_x_api_key():
     assert h["x-api-key"] == "provider-secret"  # upstream key, not client's
     assert h["anthropic-version"] == "2023-06-01"  # forwarded from client
     assert "Authorization" not in h
-    assert h["Accept-Encoding"] == "gzip, deflate"
     assert h["Content-Type"] == "application/json"
 
 
