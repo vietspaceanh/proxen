@@ -4,7 +4,7 @@ import { Card, CardContent } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { ChartCanvas } from "./ChartCanvas.jsx";
-import { fmt, fmtTime, fmtHour, fmtTTFT, fmtTPS, statusColor, resolveUser, fmtCompact } from "../lib/format.js";
+import { fmt, fmtTime, fmtHour, fmtTTFT, fmtTPS, statusColor, statusMessage, resolveUser, fmtCompact } from "../lib/format.js";
 import { THEMES } from "../lib/theme.js";
 import { chartOpts, barLabels } from "../lib/chart-setup.js";
 
@@ -45,21 +45,28 @@ function Tokens({ inp, out, cached }) {
   );
 }
 
-function StatusBadge({ status, dropped, review }) {
-  if (!status) return <Badge variant="outline">ERR</Badge>;
-  if (dropped)
+function StatusBadge({ status, dropped, review, clientDisconnect }) {
+  const title = statusMessage(status, { dropped, review, clientDisconnect });
+  if (clientDisconnect) {
+    return <Badge variant="outline" title={title}>cancelled</Badge>;
+  }
+  if (!status) {
+    return <Badge variant="outline" title={title}>ERR</Badge>;
+  }
+  if (dropped) {
     return (
       <Badge
         variant="outline"
         style={{ color: "var(--orange)", borderColor: "var(--orange)" }}
-        title={`upstream returned ${status} but closed the stream before completion`}
+        title={title}
       >
         dropped
       </Badge>
     );
+  }
   const color = status >= 500 ? "var(--danger)" : status >= 400 ? "var(--orange)" : "var(--success)";
   return (
-    <Badge variant="outline" style={{ color, borderColor: color }}>
+    <Badge variant="outline" style={{ color, borderColor: color }} title={title}>
       {status}{review ? <span style={{ color: "var(--warning)" }}> ⚠</span> : ""}
     </Badge>
   );
@@ -270,7 +277,7 @@ function MonitorImpl({ stats, theme }) {
                       <TableCell className="w-[3px] p-0" style={{ background: indColor }} />
                       <TableCell className="text-muted-foreground tabular-nums text-[0.78rem] whitespace-nowrap">{fmtTime(rec.timestamp)}</TableCell>
                       <TableCell className="mono"><span className="inline-flex items-center gap-1.5 max-w-[240px]">{rec.upstream && <Badge variant="outline" className="h-auto px-1 py-px text-[0.62rem] uppercase tracking-wide text-muted-foreground">{rec.upstream}</Badge>}<span className="truncate" title={rec.model || ""}>{rec.model || ""}</span></span></TableCell>
-                      <TableCell>{rec.client_disconnect ? <Badge variant="outline">cancelled</Badge> : <StatusBadge status={status} dropped={rec.upstream_dropped} review={rec.needs_review} />}</TableCell>
+                      <TableCell><StatusBadge status={status} dropped={rec.upstream_dropped} review={rec.needs_review} clientDisconnect={rec.client_disconnect} /></TableCell>
                       <Latency ttft={rec.ttft} tps={rec.tps} />
                       <Tokens inp={rec.input_tokens} out={rec.output_tokens} cached={rec.cached_input_tokens} />
                       <TableCell className="mono tabular-nums">${fmt(rec.cost || 0, 4)}</TableCell>

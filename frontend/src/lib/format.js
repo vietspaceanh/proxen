@@ -52,6 +52,32 @@ export function statusColor(status) {
   return "var(--success)";
 }
 
+const STATUS_MESSAGES = new Map([
+  [400, "Bad request"],
+  [401, "Unauthorized"],
+  [403, "Forbidden"],
+  [404, "Model not found"],
+  [408, "Request timed out"],
+  [410, "Resource gone"],
+  [429, "Rate limit exceeded"],
+  [499, "Client disconnected"],
+  [500, "Internal server error"],
+  [502, "Upstream unavailable"],
+  [503, "No routes available"],
+]);
+
+export function statusMessage(status, flags = {}) {
+  const { dropped, review, clientDisconnect } = flags;
+  if (clientDisconnect) return "Client disconnected before completion";
+  if (dropped) return `Upstream returned ${status} but closed the stream before completion`;
+  if (review) return "Completed but no usage tokens received";
+  return STATUS_MESSAGES.get(status)
+    ?? (status >= 500 ? "Upstream server error"
+    : status >= 400 ? "Client error"
+    : status >= 200 ? "Success"
+    : "Unknown error");
+}
+
 export function adminKey() {
   return localStorage.getItem("proxen-admin-key") || "";
 }

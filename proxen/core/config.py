@@ -53,7 +53,7 @@ upstream_sock_read = 120.0
 # window, the route is abandoned and the next fallback route is tried. This
 # prevents a slow-but-alive upstream from monopolising traffic while faster
 # fallbacks are available. Set to 0 to disable.
-upstream_ttft_timeout = 30.0
+upstream_ttft_timeout = 60.0
 
 # Trusted reverse proxy IPs for X-Forwarded-For / X-Forwarded-Proto handling.
 # Set to the IP(s) of your reverse proxy (nginx, Caddy, etc.).
