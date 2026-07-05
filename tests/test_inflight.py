@@ -5,6 +5,7 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock
 
+from proxen.core.config import Settings
 from proxen.core.models import RequestRecord
 from proxen.services.telemetry import TelemetryWriter
 from proxen.services.upstream import UpstreamManager
@@ -12,7 +13,7 @@ from proxen.services.upstream import UpstreamManager
 
 def _mgr(limits: dict) -> UpstreamManager:
     """A minimal UpstreamManager with only provider-limit state populated."""
-    mgr = UpstreamManager(MagicMock(), MagicMock(), MagicMock())
+    mgr = UpstreamManager(Settings(), MagicMock(), MagicMock())
     mgr._provider_limits = limits
     return mgr
 

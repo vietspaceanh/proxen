@@ -100,7 +100,7 @@ def _make_proxy(resp, *, ttft_timeout: float = 30.0) -> tuple[Proxy, MagicMock, 
     catalog.get_model.return_value = None
 
     upstream_mgr = MagicMock()
-    upstream_mgr.is_healthy.return_value = True
+    upstream_mgr.should_try.return_value = True
     upstream_mgr.acquire_provider.return_value = True
     upstream_mgr.post = AsyncMock(return_value=resp)
 
@@ -214,7 +214,7 @@ async def test_disconnect_does_not_poison_health_guard():
     async for chunk in stream_gen():
         chunks.append(chunk)
 
-    upstream_mgr.record_upstream_failure.assert_not_called()
+    upstream_mgr.record_failure.assert_not_called()
     sink.enqueue.assert_called_once()
     assert sink.enqueue.call_args.args[0].client_disconnect is True
 
@@ -238,7 +238,7 @@ async def test_normal_completion_does_not_record_failure():
     async for _ in stream_gen():
         pass
 
-    upstream_mgr.record_upstream_failure.assert_not_called()
+    upstream_mgr.record_failure.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -281,7 +281,7 @@ async def test_upstream_error_not_disconnected():
         async for _ in stream_gen():
             pass
 
-    upstream_mgr.record_upstream_failure.assert_called_once_with("mock")
+    upstream_mgr.record_failure.assert_called_once_with("mock", "gpt-test", weight=1)
 
 
 # ─── Receiving-phase disconnect recording ───────────────────────────

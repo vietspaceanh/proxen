@@ -9,7 +9,7 @@ import msgspec
 
 from ..core.config import Settings, Upstream
 from ..core.contracts import UpstreamCatalog
-from ..core.gate import HealthGuard
+from ..core.health import HealthCheck
 from .telemetry import Database
 
 log = logging.getLogger("proxen.upstream")
@@ -37,7 +37,10 @@ class UpstreamManager:
         self._models_cache: dict[str, list[dict]] = {}
         self._provider_inflight: dict[str, int] = {}
         self._provider_limits: dict[str, int | None] = {}
-        self._guards: dict[str, HealthGuard] = {}
+        self._health = HealthCheck(
+            failure_threshold=settings.health_guard_failures,
+            backoff_base=settings.health_guard_retry_delay,
+        )
 
     # ── Per-provider concurrency ─────────────────────────────────────
 
@@ -48,8 +51,6 @@ class UpstreamManager:
         for store in (self._provider_limits, self._provider_inflight):
             if old_name in store:
                 store[new_name] = store.pop(old_name)
-        if old_name in self._guards:
-            self._guards[new_name] = self._guards.pop(old_name)
         if old_name in self._models_cache:
             self._models_cache[new_name] = self._models_cache.pop(old_name)
 
@@ -72,34 +73,27 @@ class UpstreamManager:
     def provider_inflight(self) -> dict[str, int]:
         return dict(self._provider_inflight)
 
-    # ── Per-upstream health guard ──────────────────────────────────────
+    def should_try(self, upstream_name: str, model_id: str) -> bool:
+        return self._health.should_try((upstream_name, model_id))
 
-    def _get_guard(self, name: str) -> HealthGuard:
-        guard = self._guards.get(name)
-        if guard is None:
-            guard = HealthGuard(
-                failure_threshold=self._settings.health_guard_failures,
-                cooldown=self._settings.health_guard_cooldown,
-            )
-            self._guards[name] = guard
-        return guard
+    def should_retry(self, upstream_name: str, model_id: str) -> bool:
+        return self._health.should_retry((upstream_name, model_id))
 
-    def is_healthy(self, name: str) -> bool:
-        return self._get_guard(name).is_healthy()
+    def record_failure(self, upstream_name: str, model_id: str, weight: int = 1) -> None:
+        self._health.record_failure((upstream_name, model_id), weight=weight)
 
-    def record_upstream_success(self, name: str) -> None:
-        self._get_guard(name).record_success()
-
-    def record_upstream_failure(self, name: str) -> None:
-        self._get_guard(name).record_failure()
+    def record_success(self, upstream_name: str, model_id: str) -> None:
+        self._health.record_success((upstream_name, model_id))
 
     def provider_status(self) -> dict[str, dict]:
         out: dict[str, dict] = {}
-        for name in set(self._provider_inflight) | set(self._provider_limits) | set(self._guards):
+        for name in set(self._provider_inflight) | set(self._provider_limits):
             out[name] = {
                 "inflight": self._provider_inflight.get(name, 0),
-                "guard": self._get_guard(name).state,
+                "routes": {},
             }
+        for (name, model_id), state in self._health.failing_states().items():
+            out.setdefault(name, {"inflight": 0, "routes": {}})["routes"][model_id] = state
         return out
 
     async def init(self) -> None:

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import aiohttp
 import msgspec
 
-from ..core.config import ModelRoute, Settings
+from ..core.config import ModelRoute, Settings, Upstream
 from ..core.contracts import TelemetrySink, UpstreamCatalog
 from ..core.gate import InflightSlot
 from ..core.models import RequestRecord
@@ -265,6 +265,19 @@ _SIMPLE_TIMEOUT = aiohttp.ClientTimeout(total=300, connect=10)
 _RETRY_STATUSES = frozenset({401, 403, 404, 408, 410, 429})
 
 
+class _RouteResult(msgspec.Struct):
+    """Outcome of a single upstream route attempt."""
+
+    ok: bool = False
+    disconnect: bool = False
+    held: bool = False
+    resp: object = None
+    upstream_name: str = ""
+    upstream_model_id: str = ""
+    first_chunk: bytes = b""
+    start: float = 0.0
+
+
 class Proxy:
     """Routes client requests to upstreams with fallback and telemetry."""
 
@@ -363,11 +376,11 @@ class Proxy:
             url += "?" + query
         return url
 
-    def _release_held(self, resp: aiohttp.ClientResponse | None, name: str) -> None:
-        if resp is not None:
+    def _release_held(self, held: _RouteResult | None) -> None:
+        if held is not None and held.resp is not None:
             with suppress(Exception):
-                resp.release()
-            self.upstream_mgr.release_provider(name)
+                held.resp.release()
+            self.upstream_mgr.release_provider(held.upstream_name)
 
     def _prepare_request(
         self, body: bytes, model: str, path: str,
@@ -406,6 +419,141 @@ class Proxy:
 
     # ── Routing (shared by forward_stream + forward_simple) ───────────
 
+    def _route_fail(
+        self, upstream: Upstream, route: ModelRoute, weight: int,
+        resp: aiohttp.ClientResponse | None = None,
+    ) -> _RouteResult:
+        if resp is not None:
+            with suppress(Exception):
+                resp.release()
+        self.upstream_mgr.release_provider(upstream.name)
+        self.upstream_mgr.record_failure(upstream.name, route.upstream_model_id, weight=weight)
+        return _RouteResult(upstream_name=upstream.name)
+
+    async def _attempt_route(
+        self,
+        route: ModelRoute,
+        upstream: Upstream,
+        raw_headers,
+        path: str,
+        query: str,
+        body_or_payload,
+        model: str,
+        protocol: str,
+        slot: InflightSlot | None,
+        disconnect: asyncio.Event,
+        *,
+        ttft_timeout: float | None = None,
+        simple_timeout: aiohttp.ClientTimeout | None = None,
+    ) -> _RouteResult:
+        """Try a single route. Handles provider slots, health recording,
+        disconnect racing, and the TTFT gate."""
+        if not self.upstream_mgr.acquire_provider(upstream.name):
+            log.info("provider limit: skipping upstream %s", upstream.name)
+            return _RouteResult()
+        if slot:
+            slot.upstream = upstream.name
+
+        start = time.perf_counter()
+        route_body = self._route_body(body_or_payload, model, route)
+        headers = _filter_headers(
+            raw_headers, upstream.api_key.get_secret_value(), protocol,
+        )
+        url = self._upstream_url(upstream, path, query)
+        kw: dict = {"headers": headers, "data": route_body}
+        if simple_timeout is not None:
+            kw["timeout"] = simple_timeout
+
+        if ttft_timeout:
+            remaining = start + ttft_timeout - time.perf_counter()
+            post_task = asyncio.ensure_future(
+                asyncio.wait_for(
+                    self.upstream_mgr.post(url, **kw), max(0.001, remaining),
+                )
+            )
+        else:
+            post_task = asyncio.ensure_future(self.upstream_mgr.post(url, **kw))
+
+        if await _race(post_task, disconnect):
+            if post_task.done():
+                with suppress(Exception):
+                    post_task.result().close()
+            else:
+                post_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await post_task
+            self.upstream_mgr.release_provider(upstream.name)
+            return _RouteResult(disconnect=True, upstream_name=upstream.name)
+
+        try:
+            resp = post_task.result()
+        except asyncio.TimeoutError:
+            return self._route_fail(upstream, route, 2)
+        except aiohttp.ClientError as exc:
+            log.warning("upstream %s connect failed: %s", upstream.name, exc)
+            return self._route_fail(upstream, route, 2)
+        except BaseException:
+            self.upstream_mgr.release_provider(upstream.name)
+            raise
+
+        if resp.status >= 500:
+            return self._route_fail(upstream, route, 1, resp)
+
+        if resp.status in _RETRY_STATUSES:
+            return _RouteResult(
+                held=True, resp=resp,
+                upstream_name=upstream.name,
+                upstream_model_id=route.upstream_model_id,
+            )
+
+        first_chunk = b""
+        if ttft_timeout:
+            remaining = start + ttft_timeout - time.perf_counter()
+            read_task = asyncio.ensure_future(
+                asyncio.wait_for(
+                    resp.content.readany(), max(0.001, remaining),
+                )
+            )
+
+            if await _race(read_task, disconnect):
+                with suppress(Exception):
+                    resp.close()
+                if not read_task.done():
+                    read_task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await read_task
+                self.upstream_mgr.release_provider(upstream.name)
+                if slot is not None:
+                    self._cancel_telemetry(
+                        slot.wall_start, start, slot.model, slot.key_id,
+                        upstream.name, resp.status, stream=True,
+                    )
+                return _RouteResult(disconnect=True, upstream_name=upstream.name)
+
+            try:
+                first_chunk = read_task.result()
+            except asyncio.TimeoutError:
+                log.warning(
+                    "upstream %s TTFT timeout (%.1fs), falling back",
+                    upstream.name, ttft_timeout,
+                )
+                return self._route_fail(upstream, route, 2, resp)
+            except aiohttp.ClientError as exc:
+                log.warning(
+                    "upstream %s read failed during TTFT wait: %s",
+                    upstream.name, exc,
+                )
+                return self._route_fail(upstream, route, 1, resp)
+
+        self.upstream_mgr.record_success(upstream.name, route.upstream_model_id)
+        return _RouteResult(
+            ok=True, resp=resp,
+            upstream_name=upstream.name,
+            upstream_model_id=route.upstream_model_id,
+            first_chunk=first_chunk,
+            start=start,
+        )
+
     async def _try_routes(
         self,
         raw_headers,
@@ -420,172 +568,79 @@ class Proxy:
         *,
         ttft_timeout: float | None = None,
         simple_timeout: aiohttp.ClientTimeout | None = None,
-    ) -> tuple[aiohttp.ClientResponse, str, float, bytes] | None:
-        """Try each route. Returns (resp, upstream, start, first_chunk) or None."""
-        last_exc: Exception | None = None
-        last_retryable_resp: aiohttp.ClientResponse | None = None
-        last_retryable_upstream = ""
+    ) -> tuple[aiohttp.ClientResponse, str, str, float, bytes] | None:
+        """Try routes with health-aware two-pass fallback.
+
+        Returns (resp, upstream_name, upstream_model_id, start, first_chunk)
+        on success, or None on client disconnect.
+        """
+        held: _RouteResult | None = None
         upstream_name = ""
-        start = time.perf_counter()
+        failing: list[tuple[ModelRoute, Upstream]] = []
 
-        for route in routes:
-            if not route.enabled:
-                continue
-            upstream = self._catalog.get_upstream(route.upstream_name)
-            if upstream is None or not upstream.enabled:
-                continue
-            if not self.upstream_mgr.is_healthy(upstream.name):
-                log.info("health guard: skipping failing upstream %s", upstream.name)
-                continue
-            if not self.upstream_mgr.acquire_provider(upstream.name):
-                log.info("provider limit: skipping upstream %s", upstream.name)
-                continue
-            if slot:
-                slot.upstream = upstream.name
+        usable = [
+            (r, u) for r in routes
+            if r.enabled
+            and (u := self._catalog.get_upstream(r.upstream_name)) is not None
+            and u.enabled
+        ]
+        single = len(usable) <= 1
 
-            route_body = self._route_body(body_or_payload, model, route)
-            headers = _filter_headers(
-                raw_headers, upstream.api_key.get_secret_value(), protocol,
-            )
-            url = self._upstream_url(upstream, path, query)
-            kw: dict = {"headers": headers, "data": route_body}
-            if simple_timeout is not None:
-                kw["timeout"] = simple_timeout
-
-            # POST - race against disconnect
-            if ttft_timeout:
-                remaining = start + ttft_timeout - time.perf_counter()
-                post_task = asyncio.ensure_future(
-                    asyncio.wait_for(
-                        self.upstream_mgr.post(url, **kw), max(0.001, remaining),
-                    )
-                )
-            else:
-                post_task = asyncio.ensure_future(self.upstream_mgr.post(url, **kw))
-
-            if await _race(post_task, disconnect):
-                if post_task.done():
-                    with suppress(Exception):
-                        post_task.result().close()
-                else:
-                    post_task.cancel()
-                    with suppress(asyncio.CancelledError, Exception):
-                        await post_task
-                self.upstream_mgr.release_provider(upstream.name)
-                self._release_held(last_retryable_resp, last_retryable_upstream)
-                return None
-
-            try:
-                resp = post_task.result()
-            except asyncio.TimeoutError:
-                self.upstream_mgr.release_provider(upstream.name)
-                self.upstream_mgr.record_upstream_failure(upstream.name)
-                upstream_name = upstream.name
-                start = time.perf_counter()
-                continue
-            except aiohttp.ClientError as exc:
-                last_exc = exc
-                self.upstream_mgr.release_provider(upstream.name)
-                self.upstream_mgr.record_upstream_failure(upstream.name)
-                upstream_name = upstream.name
-                log.warning("upstream %s connect failed: %s", upstream.name, exc)
-                start = time.perf_counter()
-                continue
-            except BaseException:
-                self.upstream_mgr.release_provider(upstream.name)
-                self._release_held(last_retryable_resp, last_retryable_upstream)
-                raise
-
-            # ── Status check ──────────────────────────────────────
-            if resp.status >= 500:
-                with suppress(Exception):
-                    resp.release()
-                self.upstream_mgr.release_provider(upstream.name)
-                self.upstream_mgr.record_upstream_failure(upstream.name)
-                upstream_name = upstream.name
-                start = time.perf_counter()
-                continue
-
-            if resp.status in _RETRY_STATUSES:
-                self._release_held(last_retryable_resp, last_retryable_upstream)
-                last_retryable_resp = resp
-                last_retryable_upstream = upstream.name
-                upstream_name = upstream.name
-                start = time.perf_counter()
-                continue
-
-            # ── TTFT gate (streaming only) ─────────────────────────
-            first_chunk = b""
-            if ttft_timeout:
-                remaining = start + ttft_timeout - time.perf_counter()
-                read_task = asyncio.ensure_future(
-                    asyncio.wait_for(
-                        resp.content.readany(), max(0.001, remaining),
-                    )
-                )
-
-                if await _race(read_task, disconnect):
-                    with suppress(Exception):
-                        resp.close()
-                    if not read_task.done():
-                        read_task.cancel()
-                        with suppress(asyncio.CancelledError, Exception):
-                            await read_task
-                    self.upstream_mgr.release_provider(upstream.name)
-                    self._release_held(last_retryable_resp, last_retryable_upstream)
-                    if slot is not None:
-                        self._cancel_telemetry(
-                            slot.wall_start, start, slot.model, slot.key_id,
-                            upstream.name, resp.status, stream=True,
-                        )
-                    return None
-
-                try:
-                    first_chunk = read_task.result()
-                except asyncio.TimeoutError:
-                    log.warning(
-                        "upstream %s TTFT timeout (%.1fs), falling back",
-                        upstream.name, ttft_timeout,
-                    )
-                    with suppress(Exception):
-                        resp.release()
-                    self.upstream_mgr.release_provider(upstream.name)
-                    self.upstream_mgr.record_upstream_failure(upstream.name)
-                    upstream_name = upstream.name
-                    start = time.perf_counter()
-                    continue
-                except aiohttp.ClientError as exc:
-                    last_exc = exc
-                    log.warning(
-                        "upstream %s read failed during TTFT wait: %s",
-                        upstream.name, exc,
-                    )
-                    with suppress(Exception):
-                        resp.release()
-                    self.upstream_mgr.release_provider(upstream.name)
-                    self.upstream_mgr.record_upstream_failure(upstream.name)
-                    upstream_name = upstream.name
-                    start = time.perf_counter()
-                    continue
-
-            # ── Route succeeded ────────────────────────────────────
-            self.upstream_mgr.record_upstream_success(upstream.name)
-            self._release_held(last_retryable_resp, last_retryable_upstream)
-            if slot is not None:
-                slot.mark_receiving()
-            return resp, upstream.name, start, first_chunk
-
-        # All routes exhausted
-        if last_retryable_resp is not None:
-            if slot is not None:
-                slot.mark_receiving()
-            return last_retryable_resp, last_retryable_upstream, start, b""
-
-        message = (
-            f"upstream unavailable: {last_exc}" if last_exc
-            else "upstream unavailable"
+        kw = dict(
+            raw_headers=raw_headers, path=path, query=query,
+            body_or_payload=body_or_payload, model=model, protocol=protocol,
+            slot=slot, disconnect=disconnect,
+            ttft_timeout=ttft_timeout, simple_timeout=simple_timeout,
         )
-        raise UpstreamUnavailable(message, upstream=upstream_name or "none")
+
+        for route, upstream in usable:
+            if not single and not self.upstream_mgr.should_try(
+                upstream.name, route.upstream_model_id,
+            ):
+                failing.append((route, upstream))
+                continue
+
+            r = await self._attempt_route(route, upstream, **kw)
+            upstream_name = r.upstream_name
+            if r.ok:
+                self._release_held(held)
+                if slot is not None:
+                    slot.mark_receiving()
+                return r.resp, r.upstream_name, r.upstream_model_id, r.start, r.first_chunk
+            if r.disconnect:
+                self._release_held(held)
+                return None
+            if r.held:
+                self._release_held(held)
+                held = r
+
+        if held is None:
+            for route, upstream in failing:
+                if not self.upstream_mgr.should_retry(
+                    upstream.name, route.upstream_model_id,
+                ):
+                    continue
+                r = await self._attempt_route(route, upstream, **kw)
+                upstream_name = r.upstream_name
+                if r.ok:
+                    self._release_held(held)
+                    if slot is not None:
+                        slot.mark_receiving()
+                    return r.resp, r.upstream_name, r.upstream_model_id, r.start, r.first_chunk
+                if r.disconnect:
+                    self._release_held(held)
+                    return None
+                if r.held:
+                    self._release_held(held)
+                    held = r
+                break
+
+        if held is not None:
+            if slot is not None:
+                slot.mark_receiving()
+            return held.resp, held.upstream_name, held.upstream_model_id, time.perf_counter(), b""
+
+        raise UpstreamUnavailable("upstream unavailable", upstream=upstream_name or "none")
 
     # ── Forward: streaming ────────────────────────────────────────────
 
@@ -627,7 +682,7 @@ class Proxy:
         if result is None:
             return None
 
-        resp, upstream_name, start, first_chunk = result
+        resp, upstream_name, upstream_model_id, start, first_chunk = result
 
         # ── Build streaming generator (closure captures all state) ─────
         _self = self
@@ -637,6 +692,7 @@ class Proxy:
         _gate = gate
         _slot = slot
         _upstream_name = upstream_name
+        _upstream_model_id = upstream_model_id
         _model = model
         _key_id = key_id
         _start = start
@@ -731,7 +787,7 @@ class Proxy:
                     _resp.status, ttft, duration, usage.output_tokens
                 )
                 if upstream_error and _upstream_name:
-                    _self.upstream_mgr.record_upstream_failure(_upstream_name)
+                    _self.upstream_mgr.record_failure(_upstream_name, _upstream_model_id, weight=1)
                 _release(force=not completed)
                 if not _watcher.done():
                     with suppress(asyncio.CancelledError, Exception):
@@ -788,7 +844,7 @@ class Proxy:
         if result is None:
             return None
 
-        resp, upstream_name, start, _ = result
+        resp, upstream_name, _upstream_model_id, start, _ = result
 
         # Read response - race against disconnect
         read_task = asyncio.ensure_future(resp.read())

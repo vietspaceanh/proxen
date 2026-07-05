@@ -289,7 +289,7 @@ def test_429_does_not_affect_health_guard(app_client, mock_upstream):
         )
         assert r.status_code == 429
     stats = app_client.get("/api/stats", headers=ADM).json()
-    assert stats["providers"]["rate-limited"]["guard"] == "healthy"
+    assert stats["providers"]["rate-limited"]["routes"] == {}
 
 
 # ─── All upstreams down -> 502 ──────────────────────────────────────
@@ -598,7 +598,7 @@ def test_404_does_not_trip_health_guard(app_client, mock_upstream):
         )
         assert r.status_code == 404
     stats = app_client.get("/api/stats", headers=ADM).json()
-    assert stats["providers"]["v9h"]["guard"] == "healthy"
+    assert stats["providers"]["v9h"]["routes"] == {}
 
 
 def test_fallback_uses_each_route_model_id(app_client, mock_upstream):
@@ -765,7 +765,7 @@ def test_ttft_timeout_falls_back_to_next_upstream(ttft_client, mock_upstream):
         ) as r:
             assert r.status_code == 200
     stats = ttft_client.get("/api/stats", headers=ADM).json()
-    assert stats["providers"]["slow"]["guard"] == "failing"
+    assert stats["providers"]["slow"]["routes"]["gpt-test"] == "failing"
 
 
 def test_ttft_timeout_only_route_returns_502(ttft_client, mock_upstream):

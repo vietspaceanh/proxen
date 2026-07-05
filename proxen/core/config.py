@@ -65,11 +65,12 @@ trusted_hosts = "127.0.0.1"
 admin_rate_limit = 100
 admin_rate_limit_window = 60.0
 
-# Health guard: consecutive 5xx / connection errors to mark an upstream
-# as "failing" (skipped until cooldown).  After cooldown seconds,
-# a single probe request is allowed; success → healthy, failure → failing.
+# Health guard: weighted failures before a route is marked "failing" and skipped
+# (fallback routes are tried instead).  Connection errors and TTFT timeouts count
+# as weight 2; 5xx as weight 1.  After tripping, probes use exponential backoff
+# (retry_delay x2 each time). Set failures to 0 to disable.
 health_guard_failures = 5
-health_guard_cooldown = 30.0
+health_guard_retry_delay = 5.0
 
 # Upstream providers (OpenAI-compatible).
 # Uncomment and edit to configure:
@@ -220,7 +221,7 @@ class Settings:
     admin_rate_limit: int = 100
     admin_rate_limit_window: float = 60.0
     health_guard_failures: int = 5
-    health_guard_cooldown: float = 30.0
+    health_guard_retry_delay: float = 5.0
     pricing: dict[str, Pricing] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -242,7 +243,7 @@ class Settings:
             "admin_rate_limit": self.admin_rate_limit,
             "admin_rate_limit_window": self.admin_rate_limit_window,
             "health_guard_failures": self.health_guard_failures,
-            "health_guard_cooldown": self.health_guard_cooldown,
+            "health_guard_retry_delay": self.health_guard_retry_delay,
             "pricing": {k: v.__dict__ for k, v in self.pricing.items()},
         }
 
@@ -314,7 +315,7 @@ def _build_settings(data: dict[str, Any]) -> Settings:
         admin_rate_limit=int(data.get("admin_rate_limit", 100)),
         admin_rate_limit_window=float(data.get("admin_rate_limit_window", 60.0)),
         health_guard_failures=int(data.get("health_guard_failures", 5)),
-        health_guard_cooldown=float(data.get("health_guard_cooldown", 30.0)),
+        health_guard_retry_delay=float(data.get("health_guard_retry_delay", 5.0)),
         pricing=pricing,
     )
 
