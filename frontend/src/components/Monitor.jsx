@@ -124,6 +124,7 @@ function buildTpsChart(stats, theme) {
     options: chartOpts({
       interaction: { mode: "index", intersect: false },
       plugins: {
+        legend: { labels: { color: text, boxWidth: 20, boxHeight: 1, font: { size: 11 } } },
         tooltip: {
           callbacks: {
             label: (ctx) => {
