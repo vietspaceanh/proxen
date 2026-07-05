@@ -84,7 +84,7 @@ function ElapsedBadge({ now, startedAt, noSignal, ttft, phase }) {
   return (
     <span className="inline-flex items-center gap-1.5">
       {statusBadge}
-      <Badge variant="outline" style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>ttft: {t}</Badge>
+      <Badge variant="outline" style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>TTFT: {t}</Badge>
     </span>
   );
 }
@@ -117,11 +117,23 @@ function buildTpsChart(stats, theme) {
     data: {
       labels: ttft.map((r) => fmtHour(r.timestamp)),
       datasets: [
-        { label: "TPS", data: ttft.map((r) => r.tps), borderColor: accent, backgroundColor: accent + "22", yAxisID: "y", tension: 0.3, pointRadius: 0, borderWidth: 2, spanGaps: true },
-        { label: "TTFT (s)", data: ttft.map((r) => r.ttft), borderColor: accent2, backgroundColor: accent2 + "22", yAxisID: "y1", tension: 0.3, pointRadius: 0, borderWidth: 2 },
+        { label: "TPS", data: ttft.map((r) => r.tps), borderColor: accent, backgroundColor: accent + "22", yAxisID: "y", tension: 0.3, pointRadius: 1, pointHoverRadius: 6, pointStyle: "circle", borderWidth: 2, spanGaps: true },
+        { label: "TTFT (s)", data: ttft.map((r) => r.ttft), borderColor: accent2, backgroundColor: accent2 + "22", yAxisID: "y1", tension: 0.3, pointRadius: 1, pointHoverRadius: 6, pointStyle: "circle", borderWidth: 2 },
       ],
     },
     options: chartOpts({
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.parsed.y;
+              if (v == null) return null;
+              return ctx.dataset.label === "TPS" ? ` TPS: ${fmt(v, 1)}t/s` : ` TTFT: ${fmt(v)}s`;
+            },
+          },
+        },
+      },
       scales: {
         x: { ticks: { color: text, maxTicksLimit: 8, font: { size: 11 } }, grid: { color: grid } },
         y: { position: "left", ticks: { color: accent, font: { size: 11 } }, grid: { color: grid }, title: { display: true, text: "TPS", color: accent, font: { size: 11 } } },
