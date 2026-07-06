@@ -77,7 +77,7 @@ function RouteEditor({ route, index, upstreams, availableModels, onProviderChang
   const canDrag = useRef(false);
   return (
     <div
-      className={`border border-border rounded-lg p-3 mb-2 transition ${dragIndex === index ? "opacity-40" : ""}`}
+      className={`border border-border rounded-lg p-3 mb-2 transition ${dragIndex === index ? "opacity-40 ring-2 ring-primary shadow-lg" : ""}`}
       data-route-key={route.rid}
       draggable={route.enabled !== false}
       onMouseDown={(e) => { canDrag.current = !!e.target.closest("[data-drag-handle]"); }}
@@ -668,6 +668,8 @@ function KeyEditModal({ keyData, onSave, onClear, onClose }) {
 
 // ─── Model Modal (Add / Edit) ───────────────────────────────────────
 
+const SWAP_THRESHOLD = 0.4;
+
 function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
   const isEdit = !!edit;
   const [id, setId] = useState(edit?.id || "");
@@ -687,6 +689,7 @@ function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
   const [availableModels, setAvailableModels] = useState({});
   const [fetchingProvider, setFetchingProvider] = useState(null);
   const [dragIndex, setDragIndex] = useState(null);
+  const dragIndexRef = useRef(null);
   const containerRef = useRef(null);
   const positionsRef = useRef({});
 
@@ -729,7 +732,12 @@ function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
     const container = containerRef.current;
     if (!container) return;
     const cards = container.querySelectorAll("[data-route-key]");
-    cards.forEach((el) => {
+    const di = dragIndexRef.current;
+    cards.forEach((el) => { el.style.transition = "none"; el.style.transform = ""; });
+    void container.offsetHeight;
+    const movers = [];
+    cards.forEach((el, idx) => {
+      if (di !== null && idx === di) return;
       const first = positionsRef.current[el.dataset.routeKey];
       if (first == null) return;
       const last = el.getBoundingClientRect().top;
@@ -737,12 +745,10 @@ function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
       if (!delta) return;
       el.style.transition = "none";
       el.style.transform = `translateY(${delta}px)`;
+      movers.push(el);
     });
     void container.offsetHeight;
-    cards.forEach((el) => {
-      el.style.transition = "";
-      el.style.transform = "";
-    });
+    cards.forEach((el) => { el.style.transition = ""; el.style.transform = ""; });
     positionsRef.current = {};
   }, [routes]);
 
@@ -774,22 +780,29 @@ function ModelModal({ edit, allModels, upstreams, onSave, onDelete, onClose }) {
   const handleDragStart = (e, i) => {
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", "");
+    dragIndexRef.current = i;
     setDragIndex(i);
   };
   const handleDragOver = (e, i) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
-    if (dragIndex === null || dragIndex === i) return;
+    const di = dragIndexRef.current;
+    if (di === null || di === i) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const top = rect.top, h = rect.height;
+    if (i > di && e.clientY < top + h * SWAP_THRESHOLD) return;
+    if (i < di && e.clientY > top + h * (1 - SWAP_THRESHOLD)) return;
     capturePositions();
     setRoutes((prev) => {
       const next = [...prev];
-      const [moved] = next.splice(dragIndex, 1);
+      const [moved] = next.splice(di, 1);
       next.splice(i, 0, moved);
       return next;
     });
+    dragIndexRef.current = i;
     setDragIndex(i);
   };
-  const handleDragEnd = () => setDragIndex(null);
+  const handleDragEnd = () => { dragIndexRef.current = null; setDragIndex(null); };
 
   const save = () => {
     const e = {};
