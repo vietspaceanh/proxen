@@ -11,7 +11,7 @@ function Table({
     <div
       data-slot="table-container"
       className={cn(
-        "relative w-full overflow-auto max-h-[50vh] sticky-head scrollbar-thin",
+        "relative w-full overflow-auto max-h-[40vh] sticky-head scrollbar-thin",
         containerClassName,
       )}
     >

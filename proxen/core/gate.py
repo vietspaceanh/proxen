@@ -170,9 +170,15 @@ class InflightSlot:
     gate reference (e.g. from `forward_simple`).
 
     `_idle_handle` / `_idle_notified` are managed by the gate's idle
-    watch.  `_released` makes `ConcurrencyGate.release` idempotent.
+    watch.      `_released` makes `ConcurrencyGate.release` idempotent.
+
+    `seq_id` is a process-unique monotonic identifier assigned at acquisition.
+    It is used as the dashboard's row `id` so the frontend React key is never
+    reused after the slot is garbage-collected (unlike `id(slot)`, which
+    returns a memory address that CPython may recycle).
     """
 
+    seq_id: int = 0
     key_id: str = ""
     model: str = ""
     upstream: str = ""
@@ -255,6 +261,7 @@ class ConcurrencyGate:
         self._active = 0
         self._waiting: deque[asyncio.Future[None]] = deque()
         self.inflight: dict[int, InflightSlot] = {}
+        self._seq = 0
         self._on_change: Callable[[], None] | None = None
 
         # Per-key state.
@@ -435,9 +442,10 @@ class ConcurrencyGate:
     async def _gate_acquire(self, key_id: str) -> InflightSlot:
         if self._active < self._max_inflight:
             self._active += 1
-            slot = InflightSlot(key_id=key_id, wall_start=time.time())
+            self._seq += 1
+            slot = InflightSlot(seq_id=self._seq, key_id=key_id, wall_start=time.time())
             slot._notify_cb = self._notify
-            self.inflight[id(slot)] = slot
+            self.inflight[slot.seq_id] = slot
             self._schedule_idle_check(slot)
             self._notify()
             return slot
@@ -460,9 +468,10 @@ class ConcurrencyGate:
         # No `await` here: no yield point where CancelledError can be
         # injected between `wait_for` returning and the slot being
         # registered.  Dict assignment and `_notify` are both sync.
-        slot = InflightSlot(key_id=key_id, wall_start=time.time())
+        self._seq += 1
+        slot = InflightSlot(seq_id=self._seq, key_id=key_id, wall_start=time.time())
         slot._notify_cb = self._notify
-        self.inflight[id(slot)] = slot
+        self.inflight[slot.seq_id] = slot
         self._schedule_idle_check(slot)
         self._notify()
         return slot
@@ -513,13 +522,13 @@ class ConcurrencyGate:
         # `CancelledError` could be injected.
         self._active -= 1
         self._cancel_idle_check(slot)
-        self.inflight.pop(id(slot), None)
+        self.inflight.pop(slot.seq_id, None)
         self._promote_waiters()
 
     def snapshot(self) -> GateSnapshot:
         inflight = [
             {
-                "id": id(s),
+                "id": s.seq_id,
                 "model": s.model or "",
                 "upstream": s.upstream or "",
                 "started_at": int(s.wall_start * 1000),

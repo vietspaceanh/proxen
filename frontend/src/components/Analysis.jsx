@@ -219,7 +219,7 @@ function AnalysisImpl({ stats, theme, active }) {
         <Card>
           <CardContent className="p-4">
             <SectionLabel>Model Breakdown (30d)</SectionLabel>
-            <Table>
+            <Table containerClassName="max-h-[30vh]">
               <TableHeader>
                 <TableRow>
                   <TableHead>Model</TableHead>

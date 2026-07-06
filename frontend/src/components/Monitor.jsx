@@ -73,7 +73,7 @@ function StatusBadge({ status, dropped, review, clientDisconnect }) {
 }
 
 function ElapsedBadge({ now, startedAt, noSignal, ttft, phase }) {
-  const [start] = useState(() => startedAt || now);
+  const start = startedAt || now;
   const elapsed = Math.floor(Math.max(0, now - start) / 1000);
   const t = fmtTTFT(ttft);
   const receiving = phase === "receiving";
