@@ -26,7 +26,7 @@ db_path = "data.db"
 # Per-key limits can be set in the dashboard Manage tab.
 max_inflight = 5
 max_waiting = 50
-queue_timeout = 120.0
+queue_timeout = 120
 
 # Keys your clients present to proxen. Leave empty to disable auth (dev only).
 # Generate one with: openssl rand -hex 24
@@ -36,7 +36,7 @@ api_keys = []
 admin_api_keys = []
 
 # How often (seconds) to refresh the upstream model catalog.
-model_sync_interval = 3600.0
+model_sync_interval = 3600
 
 # Hard cap on inbound request body size in bytes (default 10 MB).
 max_body_bytes = 10485760
@@ -46,14 +46,14 @@ max_body_bytes = 10485760
 # resets this continuously and is never cut off. Only genuinely stalled
 # connections time out. There is no total cap, so a long-running stream stays
 # alive as long as data keeps flowing.
-upstream_sock_read = 120.0
+upstream_sock_read = 90
 
 # Time-to-first-token timeout for streaming requests (seconds). If the
 # upstream accepts the connection (200 OK) but sends no data within this
 # window, the route is abandoned and the next fallback route is tried. This
 # prevents a slow-but-alive upstream from monopolising traffic while faster
 # fallbacks are available. Set to 0 to disable.
-upstream_ttft_timeout = 90.0
+upstream_ttft_timeout = 60
 
 # Trusted reverse proxy IPs for X-Forwarded-For / X-Forwarded-Proto handling.
 # Set to the IP(s) of your reverse proxy (nginx, Caddy, etc.).
@@ -63,14 +63,14 @@ trusted_hosts = "127.0.0.1"
 
 # Admin API rate limit: max requests per IP per window.
 admin_rate_limit = 100
-admin_rate_limit_window = 60.0
+admin_rate_limit_window = 60
 
 # Health guard: weighted failures before a route is marked "failing" and skipped
 # (fallback routes are tried instead).  Connection errors and TTFT timeouts count
 # as weight 2; 5xx as weight 1.  After tripping, probes use exponential backoff
 # (retry_delay x2 each time). Set failures to 0 to disable.
 health_guard_failures = 5
-health_guard_retry_delay = 5.0
+health_guard_retry_delay = 5
 
 # Upstream providers (OpenAI-compatible).
 # Uncomment and edit to configure:
