@@ -126,7 +126,10 @@ function buildTpsChart(stats, theme) {
       plugins: {
         legend: { labels: { color: text, boxWidth: 20, boxHeight: 1, font: { size: 11 } } },
         tooltip: {
+          boxWidth: 20,
+          boxHeight: 1,
           callbacks: {
+            labelColor: (ctx) => ({ borderColor: ctx.dataset.borderColor, backgroundColor: ctx.dataset.borderColor }),
             label: (ctx) => {
               const v = ctx.parsed.y;
               if (v == null) return null;

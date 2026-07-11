@@ -90,7 +90,14 @@ function buildDailyCostChart(dailyCost, theme) {
       },
       plugins: {
         legend: { labels: { color: text, boxWidth: 20, boxHeight: 1, font: { size: 11 } } },
-        tooltip: { callbacks: { label: (ctx) => ` ${ctx.dataset.label}: $${fmt(ctx.parsed.y, 2)}` } },
+        tooltip: {
+          boxWidth: 20,
+          boxHeight: 1,
+          callbacks: {
+            labelColor: (ctx) => ({ borderColor: ctx.dataset.borderColor, backgroundColor: ctx.dataset.borderColor }),
+            label: (ctx) => ` ${ctx.dataset.label}: $${fmt(ctx.parsed.y, 2)}`,
+          },
+        },
       },
     }, theme),
   };
