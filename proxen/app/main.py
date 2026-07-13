@@ -10,8 +10,9 @@ from blacksheep.server.remotes.forwarding import XForwardedHeadersMiddleware
 from blacksheep.server.routing import Router
 
 from ..core.config import Settings, load_settings
-from ..core.gate import ConcurrencyGate, KeyLimits
-from ..core.security import AuthRateLimiter, BodySizeMiddleware, SlidingWindowLimiter
+from ..core.concurrency import ConcurrencyGate, KeyLimits
+from ..core.asgi import BodySizeMiddleware
+from ..core.security import AuthRateLimiter, SlidingWindowLimiter
 from ..services.management import Management
 from ..services.proxy import AdmissionError, Proxy
 from ..services.telemetry import Database, TelemetryWriter
@@ -40,10 +41,7 @@ def create_app(settings: Settings | None = None) -> BodySizeMiddleware:
     settings = settings or load_settings()
 
     # ── Service graph ────────────────────────────────────────────────
-    # Construction order follows dependencies; each later service receives
-    # only the contracts/values it needs. Management implements
-    # UpstreamCatalog and TelemetryWriter implements TelemetrySink, so the
-    # proxy/upstream manager are decoupled from the concrete stores.
+    # Construction order follows dependencies.
     db = Database(settings.db_path)
     writer = TelemetryWriter(db)
     management = Management(settings, db)
@@ -136,7 +134,7 @@ async def _start(settings, db, management, upstream_mgr, writer, gate, broadcast
             gate.set_key_limits(key_hash, KeyLimits.from_dict(limits_data))
 
     for u in management.upstreams:
-        upstream_mgr.set_provider_limit(u.name, u.max_inflight)
+        upstream_mgr.gate.set_provider_limit(u.name, u.max_inflight)
 
     log.info(
         "proxen starting -- inflight=%d waiting=%d queue_timeout=%ss db=%s "

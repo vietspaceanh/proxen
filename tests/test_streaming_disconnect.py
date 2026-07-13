@@ -16,11 +16,10 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import pytest
 
-from proxen.core.config import ModelRoute, SecretStr, Settings, Upstream
-from proxen.core.gate import InflightSlot
-from proxen.core.httputil import watch_disconnect
-from proxen.services.context import RequestContext
-from proxen.services.proxy import Proxy
+from proxen.core.config import ModelRoute, ProxenModel, SecretStr, Settings, Upstream
+from proxen.core.concurrency import InflightSlot
+from proxen.core.asgi import watch_disconnect
+from proxen.services.proxy import Proxy, RequestContext
 
 
 # ─── Fakes ─────────────────────────────────────────────────────────
@@ -94,16 +93,15 @@ def _make_proxy(resp, *, ttft_timeout: float = 30.0, gate=None) -> tuple[Proxy, 
     upstream = Upstream(name="mock", base_url="http://mock/v1", api_key=SecretStr("key"))
 
     catalog = MagicMock()
-    catalog.is_model_enabled.return_value = True
+    catalog.get_model.return_value = ProxenModel(id="gpt-test", enabled=True)
     catalog.get_routes_by_name.return_value = [
         ModelRoute(upstream_name="mock", upstream_model_id="gpt-test")
     ]
     catalog.get_upstream.return_value = upstream
-    catalog.get_model.return_value = None
 
     upstream_mgr = MagicMock()
     upstream_mgr.health.should_try.return_value = True
-    upstream_mgr.acquire_provider.return_value = True
+    upstream_mgr.gate.try_provider.return_value = True
     upstream_mgr.post = AsyncMock(return_value=resp)
 
     sink = MagicMock()
@@ -165,7 +163,7 @@ async def test_disconnect_interrupts_stalled_upstream():
     sink.enqueue.assert_called_once()
     record = sink.enqueue.call_args.args[0]
     assert record.client_disconnect is True
-    upstream_mgr.release_provider.assert_called_with("mock")
+    upstream_mgr.gate.release_provider.assert_called_with("mock")
 
 
 @pytest.mark.asyncio
@@ -343,7 +341,7 @@ async def test_ttft_race_disconnect_records_cancelled():
     assert record.client_disconnect is True
     assert record.status == 200
     assert record.stream is True
-    upstream_mgr.release_provider.assert_called_with("mock")
+    upstream_mgr.gate.release_provider.assert_called_with("mock")
 
 
 @pytest.mark.asyncio
@@ -371,7 +369,7 @@ async def test_post_race_disconnect_not_recorded():
         await watcher
 
     sink.enqueue.assert_not_called()
-    upstream_mgr.release_provider.assert_called_with("mock")
+    upstream_mgr.gate.release_provider.assert_called_with("mock")
 
 
 @pytest.mark.asyncio
@@ -402,7 +400,7 @@ async def test_simple_read_race_disconnect_records_cancelled():
     assert record.client_disconnect is True
     assert record.status == 200
     assert record.stream is False
-    upstream_mgr.release_provider.assert_called_with("mock")
+    upstream_mgr.gate.release_provider.assert_called_with("mock")
 
 
 # ─── In-flight TTFT surfacing ───────────────────────────────────────
@@ -443,7 +441,7 @@ async def test_streaming_sets_slot_ttft():
 
 @pytest.mark.asyncio
 async def test_inflight_snapshot_includes_ttft():
-    from proxen.core.gate import ConcurrencyGate
+    from proxen.core.concurrency import ConcurrencyGate
 
     gate = ConcurrencyGate(max_inflight=5, max_waiting=10, timeout=10.0)
     slot = await gate.acquire("key-1")
@@ -466,7 +464,7 @@ async def test_inflight_snapshot_includes_ttft():
 async def test_phase_change_notifies_gate():
     """The requesting->receiving transition and the first-byte TTFT each
     trigger a dashboard push via the slot's notify callback."""
-    from proxen.core.gate import ConcurrencyGate
+    from proxen.core.concurrency import ConcurrencyGate
 
     chunks_data = [
         b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',

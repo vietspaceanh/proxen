@@ -5,7 +5,7 @@ import logging
 import msgspec
 from blacksheep import FromBytes, Response
 
-from ...core.gate import ConcurrencyGate, KeyLimits
+from ...core.concurrency import ConcurrencyGate, KeyLimits
 from ...services.management import Management
 from ...services.upstream import UpstreamManager
 from ..broadcaster import StatsBroadcaster
@@ -155,7 +155,7 @@ async def add_upstream(
 ) -> Response:
     data = _decode_body(body.value, UpstreamIn)
     result = await management.add_upstream(_struct_to_dict(data))
-    upstream_mgr.set_provider_limit(result["name"], result.get("max_inflight"))
+    upstream_mgr.gate.set_provider_limit(result["name"], result.get("max_inflight"))
     return json_response(result)
 
 
@@ -174,14 +174,15 @@ async def update_upstream(
     new_name = result["name"]
     if new_name != name:
         upstream_mgr.rename_provider(name, new_name)
-    upstream_mgr.set_provider_limit(new_name, result.get("max_inflight"))
+    upstream_mgr.gate.set_provider_limit(new_name, result.get("max_inflight"))
     return json_response(result)
 
 
 @delete("/api/management/upstreams/{name}")
-async def delete_upstream(name: str, management: Management) -> Response:
+async def delete_upstream(name: str, management: Management, upstream_mgr: UpstreamManager) -> Response:
     if not await management.delete_upstream(name):
         return error_json(404, f"upstream '{name}' not found")
+    upstream_mgr.remove_provider(name)
     return json_response({"deleted": name})
 
 

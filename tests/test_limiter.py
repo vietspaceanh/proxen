@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from proxen.core.gate import (
+from proxen.core.concurrency import (
     ConcurrencyGate,
     KeyLimits,
     QueueOverflow,
@@ -80,6 +80,28 @@ async def test_idempotent_release_does_not_double_count():
     slot2 = await gate.acquire()
     assert gate.snapshot().active == 1
     gate.release(slot2)
+
+
+@pytest.mark.asyncio
+async def test_idempotent_release_does_not_double_count_key_limits():
+    """Double-release must not double-decrement key_inflight or double-record tokens."""
+    gate = ConcurrencyGate(max_inflight=10, max_waiting=0, timeout=1.0)
+    gate.set_key_limits("k1", KeyLimits(
+        max_inflight=1,
+        max_tokens=1000,
+        max_tokens_window_s=60.0,
+    ))
+    slot = await gate.acquire("k1")
+    slot.input_tokens = 50
+    slot.output_tokens = 0
+    gate.release(slot)
+    # Second release must be a no-op for key limiter too.
+    gate.release(slot)
+    # key_inflight entry is pruned at zero — double-release must not drive it negative.
+    assert gate._keys.key_inflight.get("k1", 0) == 0
+    # Token window should only record 50, not 100.
+    tok_window = gate._keys.tok_windows["k1"]
+    assert tok_window.total == 50
 
 
 @pytest.mark.asyncio
@@ -295,7 +317,7 @@ async def test_active_not_leaked_on_waiter_cancellation():
     _active must not be leaked."""
     gate = ConcurrencyGate(max_inflight=1, max_waiting=4, timeout=10.0)
     s1 = await gate.acquire("k1")
-    assert gate._active == 1
+    assert gate._global.active == 1
 
     # Start a waiter that will be cancelled while still queued.
     waiter_task = asyncio.create_task(gate.acquire("k2"))
@@ -310,11 +332,11 @@ async def test_active_not_leaked_on_waiter_cancellation():
         pass
 
     # _active should still be 1 (only s1 holds a slot).
-    assert gate._active == 1
+    assert gate._global.active == 1
 
     # Release s1: no waiter to wake (it was cancelled), _active drops to 0.
     gate.release(s1)
-    assert gate._active == 0
+    assert gate._global.active == 0
 
 
 @pytest.mark.asyncio
@@ -352,9 +374,9 @@ async def test_waiter_completes_after_release_grants_slot():
 
     gate.release(s1)
     slot = await asyncio.wait_for(acq_task, 1.0)
-    assert gate._active == 1
+    assert gate._global.active == 1
     gate.release(slot)
-    assert gate._active == 0
+    assert gate._global.active == 0
 
 
 @pytest.mark.asyncio
@@ -374,4 +396,4 @@ async def test_cancel_waiter_with_already_resolved_future():
     # The waiter should complete successfully (not timeout/cancel).
     slot = await asyncio.wait_for(acq_task, 1.0)
     gate.release(slot)
-    assert gate._active == 0
+    assert gate._global.active == 0

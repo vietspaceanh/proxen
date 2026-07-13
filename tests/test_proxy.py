@@ -9,11 +9,8 @@ from proxen.core.sse import (
     _extract_usage,
     parse_json_usage,
 )
-from proxen.core.httputil import (
-    filter_headers,
-    protocol_from_path,
-    speed_metrics,
-)
+from proxen.services.proxy import speed_metrics
+from proxen.core.headers import filter_headers, protocol_from_path
 from proxen.services.proxy import (
     Proxy,
 )
@@ -181,7 +178,7 @@ def test_forward_headers_strips_hop_by_hop():
 def test_resp_headers_strips_encoding_and_length():
     """With auto_decompress=True the body is decoded, so the forwarded
     response must not advertise content-encoding/content-length."""
-    from proxen.core.httputil import filter_headers
+    from proxen.core.headers import filter_headers
 
     out = filter_headers(
         {

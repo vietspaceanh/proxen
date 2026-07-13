@@ -3,8 +3,8 @@
 Manages a streaming response lifecycle: yields chunks, tracks disconnect,
 parses SSE usage, records telemetry, releases resources.
 
-Extracted from ``Proxy.forward_stream`` to eliminate the closure-capture
-pattern.  State lives on the struct; methods operate on ``self``.
+Extracted from `Proxy.forward_stream` to eliminate the closure-capture
+pattern.  State lives on the struct; methods operate on `self`.
 """
 from __future__ import annotations
 
@@ -16,8 +16,7 @@ from contextlib import suppress
 import aiohttp
 import msgspec
 
-from ..core.httputil import speed_metrics
-from ..core.sse import SSEUsageParser
+from ...core.sse import SSEUsageParser
 from .context import RequestContext
 
 log = logging.getLogger("proxen.streaming")
@@ -142,3 +141,25 @@ class StreamForwarder(msgspec.Struct):
                 "stream ended completed=%s disconnected=%s model=%s duration=%.3f",
                 completed_final, disconnected, self.ctx.model, duration,
             )
+
+
+# ─── Speed metrics ─────────────────────────────────────────────────
+
+_GEN_TIME_MIN = 1.0
+
+
+def speed_metrics(
+    status: int, ttft: float, duration: float, output_tokens: int
+) -> tuple[float, float | None]:
+    """Compute (ttft, tps) from raw timing.  Returns tps=None for short
+    streams where the rate would be unreliable."""
+    if status >= 400:
+        return 0.0, 0.0
+    gen_time = duration - ttft
+    if output_tokens <= 0:
+        return ttft, 0.0
+    if gen_time <= 0:
+        return ttft, output_tokens / duration if duration > 0 else 0.0
+    if gen_time < _GEN_TIME_MIN:
+        return ttft, None
+    return ttft, output_tokens / gen_time

@@ -10,34 +10,29 @@ import aiohttp
 import msgspec
 
 from ..core.config import Settings, Upstream
-from ..core.contracts import UpstreamCatalog
-from ..core.gate import ConcurrencyGate, QueueOverflow, QueueTimeout
+from ..core.concurrency import ConcurrencyGate
 from ..core.health import HealthCheck
 from .telemetry import Database
+from .management import Management
 
 log = logging.getLogger("proxen.upstream")
 
 
 class UpstreamManager:
-    """Owns the shared HTTP session and keeps the model catalog in sync.
-
-    Depends only on the :class:`~proxen.core.contracts.UpstreamCatalog`
-    read interface, not the concrete management store, so it can be
-    constructed and tested against any catalog implementation.
-    """
+    """Owns the shared HTTP session and keeps the model catalog in sync."""
 
     def __init__(
         self,
         settings: Settings,
         db: Database,
-        catalog: UpstreamCatalog,
+        management: Management,
         gate: ConcurrencyGate,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._settings = settings
         self._db = db
-        self._catalog = catalog
-        self._gate = gate
+        self.management = management
+        self.gate = gate
         self._session = session
         self._models_cache: dict[str, list[dict]] = {}
         self._on_change: Callable[[], None] | None = None
@@ -46,35 +41,22 @@ class UpstreamManager:
             backoff_base=settings.health_guard_retry_delay,
         )
 
-    # ── Per-provider concurrency (delegates to ConcurrencyGate) ───────
+    # ── Provider helpers (with extra logic beyond gate delegation) ───
 
     def set_on_change(self, cb: Callable[[], None]) -> None:
         self._on_change = cb
 
-    def set_provider_limit(self, name: str, max_inflight: int | None) -> None:
-        self._gate.set_provider_limit(name, max_inflight)
-
     def rename_provider(self, old_name: str, new_name: str) -> None:
-        self._gate.rename_provider(old_name, new_name)
+        self.gate.rename_provider(old_name, new_name)
         if old_name in self._models_cache:
             self._models_cache[new_name] = self._models_cache.pop(old_name)
 
-    def acquire_provider(self, name: str) -> bool:
-        return self._gate.try_provider(name)
-
-    async def wait_acquire_provider(
-        self, names: list[str], disconnect: asyncio.Event,
-    ) -> str | None:
-        return await self._gate.wait_provider(names, disconnect)
-
-    def release_provider(self, name: str) -> None:
-        self._gate.release_provider(name)
-
-    def provider_inflight(self) -> dict[str, int]:
-        return self._gate.provider_inflight()
+    def remove_provider(self, name: str) -> None:
+        self.gate.remove_provider(name)
+        self._models_cache.pop(name, None)
 
     def provider_status(self) -> dict[str, dict]:
-        out = self._gate.provider_status()
+        out = self.gate.provider_status()
         for (name, model_id), state in self.health.failing_states().items():
             out.setdefault(name, {"inflight": 0, "waiting": 0, "max_inflight": None, "max_waiting": 0, "routes": {}})["routes"][model_id] = state
         return out
@@ -124,7 +106,7 @@ class UpstreamManager:
             return await self.session.post(url, **kwargs)
 
     def all_enabled(self) -> list[Upstream]:
-        return self._catalog.enabled_upstreams()
+        return self.management.enabled_upstreams()
 
     def get_models(self) -> list[dict]:
         out: list[dict] = []

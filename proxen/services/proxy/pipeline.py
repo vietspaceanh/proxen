@@ -1,8 +1,8 @@
 """Proxy orchestrator: pipeline seams, telemetry, and forward dispatch.
 
-Routing logic lives in :mod:`proxen.services.routing`, streaming in
-:mod:`proxen.services.streaming`, and HTTP utilities in
-:mod:`proxen.core.httputil`.
+Routing logic lives in :mod:`.routing`, streaming in :mod:`.forwarding`,
+and HTTP utilities in :mod:`proxen.core.headers`, :mod:`proxen.core.body`,
+and :mod:`proxen.core.asgi`.
 """
 from __future__ import annotations
 
@@ -14,23 +14,22 @@ from typing import Any
 
 import aiohttp
 
-from ..core.config import Settings
-from ..core.contracts import TelemetrySink, UpstreamCatalog
-from ..core.gate import ConcurrencyGate
-from ..core.httputil import filter_headers, race_disconnect, speed_metrics
-from ..core.models import RequestRecord
-from ..core.sse import UsageStats, parse_json_usage
+from ...core.config import Settings
+from ...core.concurrency import ConcurrencyGate
+from ...core.headers import filter_headers
+from ...core.asgi import race_disconnect
+from ...core.models import RequestRecord
+from ...core.sse import UsageStats, parse_json_usage
 from .context import (
-    AdmissionError,
-    ModelNotFound,
-    NoRoutes,
     ProxyError,
     RequestContext,
     UpstreamUnavailable,
 )
-from .routing import Router, _SIMPLE_TIMEOUT
-from .streaming import StreamForwarder
-from .upstream import UpstreamManager
+from .routing import Router
+from .forwarding import StreamForwarder, speed_metrics
+from ..upstream import UpstreamManager
+from ..management import Management
+from ..telemetry import TelemetryWriter
 
 log = logging.getLogger("proxen.proxy")
 
@@ -39,8 +38,8 @@ class Proxy:
     """Routes client requests to upstreams with fallback.
 
     The core orchestrator.  Cross-cutting concerns are injected:
-    ``admit_hooks`` for pre-acquisition admission checks,
-    ``complete_hooks`` for post-request accounting.  Both receive
+    `admit_hooks` for pre-acquisition admission checks,
+    `complete_hooks` for post-request accounting.  Both receive
     clean data (RequestContext / RequestRecord) and are simple
     callables - no protocol classes needed.
     """
@@ -49,20 +48,20 @@ class Proxy:
         self,
         settings: Settings,
         upstream_mgr: UpstreamManager,
-        catalog: UpstreamCatalog,
-        sink: TelemetrySink,
+        management: Management,
+        writer: TelemetryWriter,
         gate: ConcurrencyGate,
         admit_hooks: list | None = None,
         complete_hooks: list | None = None,
     ) -> None:
         self.settings = settings
         self.upstream_mgr = upstream_mgr
-        self._catalog = catalog
-        self._sink = sink
+        self.management = management
+        self._writer = writer
         self._gate = gate
         self.admit_hooks = admit_hooks or []
         self.complete_hooks = complete_hooks or []
-        self._router = Router(catalog, upstream_mgr, self._cancel_telemetry)
+        self._router = Router(management, upstream_mgr, self._cancel_telemetry)
 
     # ── Pipeline seams ────────────────────────────────────────────────
 
@@ -76,9 +75,9 @@ class Proxy:
         ctx.slot = await self._gate.acquire(ctx.key_hash)
 
     def release(self, ctx: RequestContext) -> None:
-        """Release all held resources. Idempotent - safe in ``finally``."""
+        """Release all held resources. Idempotent - safe in `finally`."""
         if ctx.provider:
-            self.upstream_mgr.release_provider(ctx.provider)
+            self.upstream_mgr.gate.release_provider(ctx.provider)
             ctx.provider = ""
         if ctx.slot is not None:
             self._gate.release(ctx.slot)
@@ -109,7 +108,7 @@ class Proxy:
             upstream_dropped=not completed and not disconnected,
             needs_review=self._needs_review(status, usage, completed, disconnected),
         )
-        self._sink.enqueue(record)
+        self._writer.enqueue(record)
         for hook in self.complete_hooks:
             hook(record)
 
@@ -204,7 +203,11 @@ class Proxy:
                 slot.model = ctx.model
 
             result = await self._router.try_routes(
-                ctx, body_or_payload, disconnect, simple_timeout=_SIMPLE_TIMEOUT,
+                ctx, body_or_payload, disconnect,
+                simple_timeout=aiohttp.ClientTimeout(
+                    total=self.settings.upstream_non_streaming_timeout,
+                    connect=10,
+                ),
             )
         except ProxyError as exc:
             self._error_telemetry(
@@ -225,7 +228,7 @@ class Proxy:
                     await read_task
             with suppress(Exception):
                 resp.close()
-            self.upstream_mgr.release_provider(upstream_name)
+            self.upstream_mgr.gate.release_provider(upstream_name)
             self._cancel_telemetry(
                 wall_start, start, ctx.model, ctx.key_hash,
                 upstream_name, resp.status, stream=False,
@@ -238,7 +241,7 @@ class Proxy:
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             with suppress(Exception):
                 resp.close()
-            self.upstream_mgr.release_provider(upstream_name)
+            self.upstream_mgr.gate.release_provider(upstream_name)
             self._error_telemetry(
                 wall_start, wall_perf, ctx.model, ctx.key_hash,
                 upstream_name, 502, stream=False,
@@ -263,7 +266,7 @@ class Proxy:
 
         with suppress(Exception):
             resp.release()
-        self.upstream_mgr.release_provider(upstream_name)
+        self.upstream_mgr.gate.release_provider(upstream_name)
         ctx.provider = ""
 
         return resp.status, filter_headers(resp.headers), content

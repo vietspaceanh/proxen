@@ -219,6 +219,7 @@ class Settings:
     max_body_bytes: int = 10 * 1024 * 1024
     upstream_sock_read: float = 90.0
     upstream_ttft_timeout: float = 60.0
+    upstream_non_streaming_timeout: float = 300.0
     trusted_hosts: str = "127.0.0.1"
     admin_rate_limit: int = 100
     admin_rate_limit_window: float = 60.0
@@ -241,6 +242,7 @@ class Settings:
             "max_body_bytes": self.max_body_bytes,
             "upstream_sock_read": self.upstream_sock_read,
             "upstream_ttft_timeout": self.upstream_ttft_timeout,
+            "upstream_non_streaming_timeout": self.upstream_non_streaming_timeout,
             "trusted_hosts": self.trusted_hosts,
             "admin_rate_limit": self.admin_rate_limit,
             "admin_rate_limit_window": self.admin_rate_limit_window,
@@ -313,6 +315,7 @@ def _build_settings(data: dict[str, Any]) -> Settings:
         max_body_bytes=int(data.get("max_body_bytes", 10 * 1024 * 1024)),
         upstream_sock_read=float(data.get("upstream_sock_read", 90.0)),
         upstream_ttft_timeout=float(data.get("upstream_ttft_timeout", 60.0)),
+        upstream_non_streaming_timeout=float(data.get("upstream_non_streaming_timeout", 300.0)),
         trusted_hosts=str(data.get("trusted_hosts", "127.0.0.1")),
         admin_rate_limit=int(data.get("admin_rate_limit", 100)),
         admin_rate_limit_window=float(data.get("admin_rate_limit_window", 60.0)),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from proxen.core.httputil import merge_extra_body
+from proxen.core.body import merge_extra_body
 
 
 # ─── merge_extra_body unit tests ────────────────────────────────────

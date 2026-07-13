@@ -125,9 +125,10 @@ class Management:
     """Runtime source of truth for upstreams, proxen user keys, and proxen
     model definitions (pricing + routing + on/off toggle).
 
-    Implements :class:`~proxen.core.contracts.UpstreamCatalog` so the proxy
-    and upstream manager depend on the narrow read interface rather than the
-    full mutable store.
+    The proxy and upstream manager depend on the read methods below
+    (`is_model_enabled`, `get_model`, `get_routes_by_name`,
+    `get_upstream`, `enabled_upstreams`) rather than the full
+    mutable store.
     """
 
     def __init__(self, settings: Settings, db: Database) -> None:
@@ -135,7 +136,13 @@ class Management:
         self._db = db
         self._lock = asyncio.Lock()
         self.upstreams: list[Upstream] = []
+        self._upstream_index: dict[str, Upstream] = {}
         self.keys: list[ProxenKey] = []
+        self._active_key_bytes: set[bytes] = set()
+        self._key_label_map: dict[str, str] = {}
+        self._admin_key_bytes: set[bytes] = {
+            k.encode("utf-8") for k in settings.admin_api_keys
+        }
         self.proxen_models: dict[str, ProxenModel] = {}
         self.model_routes: dict[str, list[ModelRoute]] = {}
         self._key_models: dict[str, set[str]] = {}
@@ -145,10 +152,10 @@ class Management:
     def management_enabled(self) -> bool:
         return bool(self._settings.admin_api_keys)
 
-    def admin_keys(self) -> set[str]:
-        return set(self._settings.admin_api_keys)
+    def admin_keys(self) -> set[bytes]:
+        return self._admin_key_bytes
 
-    # ── UpstreamCatalog (read interface) ─────────────────────────────
+    # ── Read interface (used by proxy + upstream manager) ────────────
 
     def is_model_enabled(self, model_id: str) -> bool:
         pm = self.proxen_models.get(model_id)
@@ -161,7 +168,7 @@ class Management:
         return self.model_routes.get(model_id, [])
 
     def get_upstream(self, name: str) -> Upstream | None:
-        return next((u for u in self.upstreams if u.name == name), None)
+        return self._upstream_index.get(name)
 
     def enabled_upstreams(self) -> list[Upstream]:
         return [u for u in self.upstreams if u.enabled]
@@ -204,10 +211,15 @@ class Management:
     async def _load_upstreams(self) -> None:
         cur = await self._db.execute("SELECT * FROM upstreams ORDER BY id ASC")
         self.upstreams = [_from_row(Upstream, r, bool_fields={"enabled"}) for r in await cur.fetchall()]
+        self._upstream_index = {u.name: u for u in self.upstreams}
 
     async def _load_keys(self) -> None:
         cur = await self._db.execute("SELECT * FROM keys ORDER BY id ASC")
         self.keys = [_from_row(ProxenKey, r, bool_fields={"active"}) for r in await cur.fetchall()]
+        self._active_key_bytes = {k.key.encode("utf-8") for k in self.keys if k.active}
+        self._key_label_map = {
+            hash_key(k.key): k.label or f"key-{k.id}" for k in self.keys
+        }
 
     async def _load_proxen_models(self) -> None:
         cur = await self._db.execute("SELECT * FROM models ORDER BY id ASC")
@@ -345,11 +357,11 @@ class Management:
             (key, label, 1, time.time()),
         )
 
-    def active_key_set(self) -> set[str]:
-        return {k.key for k in self.keys if k.active}
+    def active_key_set(self) -> set[bytes]:
+        return self._active_key_bytes
 
     def key_label_map(self) -> dict[str, str]:
-        return {hash_key(k.key): k.label or f"key-{k.id}" for k in self.keys}
+        return self._key_label_map
 
     def key_hash_by_id(self, key_id: int) -> str | None:
         k = next((k for k in self.keys if k.id == key_id), None)

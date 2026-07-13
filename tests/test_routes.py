@@ -7,6 +7,7 @@ import pytest
 
 from proxen.core.config import Upstream
 from proxen.services.proxy import Proxy
+from proxen.services.proxy.routing import Router
 
 KEY = {"Authorization": "Bearer gw-secret"}
 ADM = {"Authorization": "Bearer admin-secret"}
@@ -494,7 +495,7 @@ def _proxy():
 def test_upstream_url_strips_v1_for_versioned_bases():
     """The client's /v1 prefix is stripped when the base already carries a
     version segment (/v1, /v4, ...); kept for versionless bases."""
-    from proxen.services.routing import Router
+    from proxen.services.proxy.routing import Router
     v1 = Upstream(name="a", base_url="https://api.openai.com/v1")
     v4 = Upstream(name="b", base_url="https://api.z.ai/api/coding/paas/v4")
     bare = Upstream(name="c", base_url="https://gateway.example")

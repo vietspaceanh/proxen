@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from proxen.core.config import Settings
-from proxen.core.gate import ConcurrencyGate
+from proxen.core.concurrency import ConcurrencyGate
 from proxen.core.models import RequestRecord
 from proxen.services.telemetry import TelemetryWriter
 from proxen.services.upstream import UpstreamManager
@@ -17,7 +17,7 @@ def _mgr(limits: dict) -> UpstreamManager:
     gate = ConcurrencyGate(max_inflight=100, max_waiting=50, timeout=120.0)
     mgr = UpstreamManager(Settings(), MagicMock(), MagicMock(), gate)
     for name, limit in limits.items():
-        mgr.set_provider_limit(name, limit)
+        mgr.gate.set_provider_limit(name, limit)
     return mgr
 
 
@@ -26,23 +26,23 @@ def _mgr(limits: dict) -> UpstreamManager:
 
 def test_provider_slot_acquire_release_cycle():
     mgr = _mgr({"p": 2})
-    assert mgr.acquire_provider("p") is True
-    assert mgr.acquire_provider("p") is True
-    assert mgr.acquire_provider("p") is False  # limit reached
-    mgr.release_provider("p")
-    assert mgr.acquire_provider("p") is True
+    assert mgr.gate.try_provider("p") is True
+    assert mgr.gate.try_provider("p") is True
+    assert mgr.gate.try_provider("p") is False  # limit reached
+    mgr.gate.release_provider("p")
+    assert mgr.gate.try_provider("p") is True
     # release below zero is guarded
-    mgr.release_provider("p")
-    mgr.release_provider("p")
-    mgr.release_provider("p")
-    assert mgr.provider_inflight()["p"] == 0
+    mgr.gate.release_provider("p")
+    mgr.gate.release_provider("p")
+    mgr.gate.release_provider("p")
+    assert mgr.gate.provider_inflight()["p"] == 0
 
 
 def test_provider_slot_no_limit_means_unbounded():
     mgr = _mgr({"p": None})
     for _ in range(50):
-        assert mgr.acquire_provider("p") is True
-    assert mgr.provider_inflight()["p"] == 50
+        assert mgr.gate.try_provider("p") is True
+    assert mgr.gate.provider_inflight()["p"] == 50
 
 
 # ─── release_provider bare decrement ───────────────────────────────
@@ -52,14 +52,14 @@ def test_release_provider_bare_decrement():
     """release_provider is a bare decrement guarded against underflow."""
     mgr = _mgr({"p": 2})
 
-    mgr.acquire_provider("p")
-    mgr.acquire_provider("p")
-    assert mgr.provider_inflight()["p"] == 2
+    mgr.gate.try_provider("p")
+    mgr.gate.try_provider("p")
+    assert mgr.gate.provider_inflight()["p"] == 2
 
-    mgr.release_provider("p")
-    assert mgr.provider_inflight()["p"] == 1
-    mgr.release_provider("p")
-    assert mgr.provider_inflight()["p"] == 0
+    mgr.gate.release_provider("p")
+    assert mgr.gate.provider_inflight()["p"] == 1
+    mgr.gate.release_provider("p")
+    assert mgr.gate.provider_inflight()["p"] == 0
 
 
 # ─── Telemetry queue drop policy ───────────────────────────────

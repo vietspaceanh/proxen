@@ -1,6 +1,6 @@
 """Proxy domain types: exceptions and request context.
 
-No internal dependencies — imported by routing, streaming, and proxy modules.
+No internal dependencies - imported by routing, streaming, and proxy modules.
 """
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import ClassVar
 
 import msgspec
 
-from ..core.gate import InflightSlot
+from ...core.concurrency import InflightSlot
 
 
 class ProxyError(Exception):
@@ -49,9 +49,9 @@ class AdmissionError(Exception):
 class RequestContext(msgspec.Struct):
     """Mutable per-request state threaded through the pipeline.
 
-    Request identity fields are set by the endpoint.  ``slot`` and
-    ``provider`` are set during concurrency acquisition and routing.
-    No telemetry result fields - those go directly to ``_record()``.
+    Request identity fields are set by the endpoint.  `slot` and
+    `provider` are set during concurrency acquisition and routing.
+    No telemetry result fields - those go directly to `_record()`.
     """
 
     key_hash: str = ""

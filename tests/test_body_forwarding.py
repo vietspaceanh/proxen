@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from proxen.core.httputil import patch_field
+from proxen.core.body import patch_field
 
 
 def test_patch_model_changes_only_model_value():

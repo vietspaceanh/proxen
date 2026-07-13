@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import msgspec
 
-from proxen.core.jsonpeek import peek_model_stream
+from proxen.core.body import peek_model_stream
 
 
 def test_basic_extraction():

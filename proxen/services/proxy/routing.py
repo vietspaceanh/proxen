@@ -16,23 +16,21 @@ from typing import Any
 import aiohttp
 import msgspec
 
-from ..core.config import ModelRoute, Upstream
-from ..core.contracts import UpstreamCatalog
-from ..core.httputil import (
-    filter_headers,
+from ...core.config import ModelRoute, Upstream
+from ...core.body import (
     merge_extra_body,
     patch_field,
-    protocol_from_path,
-    race_disconnect,
 )
-from ..core.sse import SSEUsageParser
+from ...core.headers import filter_headers, protocol_from_path
+from ...core.asgi import race_disconnect
 from .context import ModelNotFound, NoRoutes, RequestContext, UpstreamUnavailable
-from .upstream import UpstreamManager
+from ..upstream import UpstreamManager
+from ..management import Management
 
-log = logging.getLogger("proxen.routing")
+log = logging.getLogger(__name__)
 
+_VERSION_RE = re.compile(r"/v\d+$")
 _RETRY_STATUSES = frozenset({401, 403, 404, 408, 410, 429})
-_SIMPLE_TIMEOUT = aiohttp.ClientTimeout(total=300, connect=10)
 
 
 class _RouteResult(msgspec.Struct):
@@ -51,35 +49,35 @@ class _RouteResult(msgspec.Struct):
 class Router:
     """Resolves and attempts routes for a request.
 
-    Holds the catalog and upstream manager; receives a ``cancel_telemetry``
+    Holds the catalog and upstream manager; receives a `cancel_telemetry`
     callback for recording client disconnects during the TTFT gate.
     """
 
     def __init__(
         self,
-        catalog: UpstreamCatalog,
+        management: Management,
         upstream_mgr: UpstreamManager,
         cancel_telemetry=None,
     ) -> None:
-        self._catalog = catalog
+        self.management = management
         self.upstream_mgr = upstream_mgr
         self._cancel_telemetry = cancel_telemetry
 
     # ── Helpers ───────────────────────────────────────────────────────
 
     def prepare_request(self, ctx: RequestContext) -> Any:
-        """Model lookup + body preparation. Sets ``ctx.routes`` and
-        ``ctx.protocol``.  Returns ``body_or_payload`` (raw bytes or a merged
-        dict when the model has ``extra_body``)."""
+        """Model lookup + body preparation. Sets `ctx.routes` and
+        `ctx.protocol`.  Returns `body_or_payload` (raw bytes or a merged
+        dict when the model has `extra_body`)."""
         if not ctx.model:
             raise ModelNotFound("no model specified")
-        if not self._catalog.is_model_enabled(ctx.model):
+        model_cfg = self.management.get_model(ctx.model)
+        if model_cfg is None or not model_cfg.enabled:
             raise ModelNotFound(f"model '{ctx.model}' is not available")
-        ctx.routes = self._catalog.get_routes_by_name(ctx.model)
+        ctx.routes = self.management.get_routes_by_name(ctx.model)
         if not ctx.routes:
             raise NoRoutes(f"no routes configured for model '{ctx.model}'")
 
-        model_cfg = self._catalog.get_model(ctx.model)
         ctx.protocol = protocol_from_path(ctx.path)
 
         if model_cfg is not None and model_cfg.extra_body:
@@ -106,7 +104,7 @@ class Router:
     @staticmethod
     def upstream_url(upstream: Upstream, path: str, query: str) -> str:
         base = upstream.base_url.rstrip("/")
-        if re.search(r"/v\d+$", base) and path.startswith("/v1/"):
+        if _VERSION_RE.search(base) and path.startswith("/v1/"):
             path = path[3:]
         url = base + path
         if query:
@@ -117,7 +115,7 @@ class Router:
         if held is not None and held.resp is not None:
             with suppress(Exception):
                 held.resp.release()
-            self.upstream_mgr.release_provider(held.upstream_name)
+            self.upstream_mgr.gate.release_provider(held.upstream_name)
 
     def route_fail(
         self, upstream: Upstream, route: ModelRoute, weight: int,
@@ -126,7 +124,7 @@ class Router:
         if resp is not None:
             with suppress(Exception):
                 resp.release()
-        self.upstream_mgr.release_provider(upstream.name)
+        self.upstream_mgr.gate.release_provider(upstream.name)
         self.upstream_mgr.health.record_failure((upstream.name, route.upstream_model_id), weight=weight)
         return _RouteResult(upstream_name=upstream.name)
 
@@ -144,9 +142,9 @@ class Router:
         simple_timeout: aiohttp.ClientTimeout | None = None,
     ) -> _RouteResult:
         """Try a single route. The provider slot is assumed already acquired
-        (by ``try_routes``).  Handles health recording, disconnect racing,
+        (by `try_routes`).  Handles health recording, disconnect racing,
         and the TTFT gate.  On failure the provider slot is released via
-        ``route_fail`` or inline."""
+        `route_fail` or inline."""
         slot = ctx.slot
         if slot:
             slot.upstream = upstream.name
@@ -179,7 +177,7 @@ class Router:
                 post_task.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await post_task
-            self.upstream_mgr.release_provider(upstream.name)
+            self.upstream_mgr.gate.release_provider(upstream.name)
             return _RouteResult(disconnect=True, upstream_name=upstream.name)
 
         try:
@@ -190,7 +188,7 @@ class Router:
             log.warning("upstream %s connect failed: %s", upstream.name, exc)
             return self.route_fail(upstream, route, 2)
         except BaseException:
-            self.upstream_mgr.release_provider(upstream.name)
+            self.upstream_mgr.gate.release_provider(upstream.name)
             ctx.provider = ""
             raise
 
@@ -220,7 +218,7 @@ class Router:
                     read_task.cancel()
                     with suppress(asyncio.CancelledError, Exception):
                         await read_task
-                self.upstream_mgr.release_provider(upstream.name)
+                self.upstream_mgr.gate.release_provider(upstream.name)
                 if slot is not None and self._cancel_telemetry is not None:
                     self._cancel_telemetry(
                         slot.wall_start, start, slot.model, slot.key_id,
@@ -267,15 +265,15 @@ class Router:
         queuing.
 
         Routes are filtered and ordered inline: healthy first
-        (``should_try``), then probing (``should_retry``).  Single-route
+        (`should_try`), then probing (`should_retry`).  Single-route
         models bypass health checking (no alternative to try).
 
         Phase 1 (non-blocking): iterate routes in order.  For each,
-        ``acquire_provider`` (non-blocking).  The first with capacity is
+        `acquire_provider` (non-blocking).  The first with capacity is
         attempted.  Full routes are collected for phase 2.
 
         Phase 2 (queue): when *all* routes are full,
-        ``wait_acquire_provider`` races a waiter on every eligible
+        `wait_acquire_provider` races a waiter on every eligible
         provider; the first to free a slot wins.
 
         Returns (resp, upstream_name, upstream_model_id, start, first_chunk)
@@ -292,7 +290,7 @@ class Router:
         for r in ctx.routes:
             if not r.enabled:
                 continue
-            u = self._catalog.get_upstream(r.upstream_name)
+            u = self.management.get_upstream(r.upstream_name)
             if u is None or not u.enabled:
                 continue
             if single or self.upstream_mgr.health.should_try((u.name, r.upstream_model_id)):
@@ -307,7 +305,7 @@ class Router:
         )
 
         for route, upstream in eligible:
-            if not self.upstream_mgr.acquire_provider(route.upstream_name):
+            if not self.upstream_mgr.gate.try_provider(route.upstream_name):
                 full.append((route, upstream))
                 continue
             ctx.provider = route.upstream_name
@@ -331,7 +329,7 @@ class Router:
 
         if held is None and full:
             names = [r.upstream_name for r, _ in full]
-            name = await self.upstream_mgr.wait_acquire_provider(names, disconnect)
+            name = await self.upstream_mgr.gate.wait_provider(names, disconnect)
             if name is None:
                 self.release_held(held)
                 return None
@@ -340,7 +338,7 @@ class Router:
                 ((r, u) for r, u in full if r.upstream_name == name), (None, None)
             )
             if route is None:
-                self.upstream_mgr.release_provider(name)
+                self.upstream_mgr.gate.release_provider(name)
                 ctx.provider = ""
             else:
                 r = await self.attempt_route(ctx, route, upstream, body_or_payload, **kw)

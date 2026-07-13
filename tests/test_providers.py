@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from proxen.core.gate import ConcurrencyGate, QueueOverflow, QueueTimeout
+from proxen.core.concurrency import ConcurrencyGate, QueueOverflow, QueueTimeout
 
 
 def _make_gate(max_inflight=2, max_waiting=10, timeout=2.0):
@@ -197,7 +197,7 @@ async def test_race_all_queues_full_raises_overflow():
     gate.try_provider("p1")
     # fill p1's wait queue
     fut = asyncio.get_running_loop().create_future()
-    gate._provider_waiters["p1"].append(fut)
+    gate._providers.waiters["p1"].append(fut)
 
     with pytest.raises(QueueOverflow):
         await gate.wait_provider(["p1"], disc)

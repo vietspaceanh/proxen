@@ -10,21 +10,20 @@ from proxen.core.security import AuthRateLimiter, SlidingWindowLimiter, mask_key
 
 
 def test_secure_in_match():
-    assert secure_in("abc", {"abc", "def"}) is True
+    assert secure_in("abc", {b"abc", b"def"}) is True
 
 
 def test_secure_in_no_match():
-    assert secure_in("nope", {"abc", "def"}) is False
+    assert secure_in("nope", {b"abc", b"def"}) is False
 
 
 def test_secure_in_empty():
-    assert secure_in("", {"abc"}) is False
+    assert secure_in("", {b"abc"}) is False
     assert secure_in("abc", set()) is False
 
 
 def test_secure_in_length_mismatch_safe():
-    # Unequal length must not raise and must return False.
-    assert secure_in("a", {"abcd"}) is False
+    assert secure_in("a", {b"abcd"}) is False
 
 
 # ─── Key masking ───────────────────────────────────────────────
@@ -72,7 +71,7 @@ def test_body_size_rejects_oversized_content_length():
     from blacksheep import Application, json as bs_json
     from starlette.testclient import TestClient
 
-    from proxen.core.security import BodySizeMiddleware
+    from proxen.core.asgi import BodySizeMiddleware
 
     app = Application(router=blacksheep.server.routing.Router())
 

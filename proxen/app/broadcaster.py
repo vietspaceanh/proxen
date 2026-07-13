@@ -5,7 +5,7 @@ import logging
 import time
 import weakref
 
-from ..core.gate import ConcurrencyGate
+from ..core.concurrency import ConcurrencyGate
 from ..services.management import Management
 from ..services.telemetry import Database, TelemetryWriter
 from ..services.upstream import UpstreamManager
