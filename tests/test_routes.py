@@ -488,20 +488,20 @@ def test_request_window_enforced_end_to_end(app_client):
 
 
 def _proxy():
-    return Proxy(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+    return Proxy(MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock())
 
 
 def test_upstream_url_strips_v1_for_versioned_bases():
     """The client's /v1 prefix is stripped when the base already carries a
     version segment (/v1, /v4, ...); kept for versionless bases."""
-    proxy = _proxy()
+    from proxen.services.routing import Router
     v1 = Upstream(name="a", base_url="https://api.openai.com/v1")
     v4 = Upstream(name="b", base_url="https://api.z.ai/api/coding/paas/v4")
     bare = Upstream(name="c", base_url="https://gateway.example")
-    assert proxy._upstream_url(v1, "/v1/chat/completions", "") == "https://api.openai.com/v1/chat/completions"
-    assert proxy._upstream_url(v4, "/v1/chat/completions", "") == "https://api.z.ai/api/coding/paas/v4/chat/completions"
-    assert proxy._upstream_url(bare, "/v1/chat/completions", "") == "https://gateway.example/v1/chat/completions"
-    assert proxy._upstream_url(v4, "/v1/chat/completions", "stream=true") == "https://api.z.ai/api/coding/paas/v4/chat/completions?stream=true"
+    assert Router.upstream_url(v1, "/v1/chat/completions", "") == "https://api.openai.com/v1/chat/completions"
+    assert Router.upstream_url(v4, "/v1/chat/completions", "") == "https://api.z.ai/api/coding/paas/v4/chat/completions"
+    assert Router.upstream_url(bare, "/v1/chat/completions", "") == "https://gateway.example/v1/chat/completions"
+    assert Router.upstream_url(v4, "/v1/chat/completions", "stream=true") == "https://api.z.ai/api/coding/paas/v4/chat/completions?stream=true"
 
 
 # ─── 4xx fallback ───────────────────────────────────────────────────

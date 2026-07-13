@@ -5,6 +5,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 
 log = logging.getLogger(__name__)
@@ -200,9 +201,15 @@ class InflightSlot:
             cb()
 
     def mark_receiving(self) -> None:
-        """Transition to the ``receiving`` phase and push an update."""
+        """Transition to the `receiving` phase and push an update."""
         self.phase = "receiving"
         self.notify()
+
+    def reset_idle(self) -> None:
+        """Clear the no-signal flag (called by the proxy on each chunk)."""
+        if self._idle_notified:
+            self._idle_notified = False
+            self.notify()
 
     def record_ttft(self, ttft: float) -> None:
         """Record time-to-first-byte and push an update."""
@@ -269,6 +276,11 @@ class ConcurrencyGate:
         self._key_limits: dict[str, KeyLimits] = {}
         self._req_windows: dict[str, _Window] = {}
         self._tok_windows: dict[str, _Window] = {}
+
+        # Per-provider state (absorbed from ProviderGate).
+        self._provider_limits: dict[str, int | None] = {}
+        self._provider_active: dict[str, int] = {}
+        self._provider_waiters: dict[str, deque[asyncio.Future[None]]] = {}
 
     def set_on_change(self, cb: Callable[[], None]) -> None:
         """Register a synchronous callback fired on acquire/release so the
@@ -552,3 +564,152 @@ class ConcurrencyGate:
         self._max_inflight = max(max_inflight, 1)
         self._max_waiting = max(max_waiting, 0)
         self._promote_waiters()
+
+    # ── Per-provider concurrency ──────────────────────────────────────
+
+    def set_provider_limit(self, name: str, max_inflight: int | None) -> None:
+        """Set or update a per-provider inflight limit. None = unlimited."""
+        self._provider_limits[name] = max_inflight
+        self._provider_active.setdefault(name, 0)
+        self._provider_waiters.setdefault(name, deque())
+        self._promote_provider_waiters(name)
+        self._notify()
+
+    def rename_provider(self, old_name: str, new_name: str) -> None:
+        if old_name in self._provider_limits:
+            self._provider_limits[new_name] = self._provider_limits.pop(old_name)
+        if old_name in self._provider_active:
+            self._provider_active[new_name] = self._provider_active.pop(old_name)
+        if old_name in self._provider_waiters:
+            self._provider_waiters[new_name] = self._provider_waiters.pop(old_name)
+
+    def try_provider(self, name: str) -> bool:
+        """Non-blocking try to acquire a provider slot. Returns True if acquired."""
+        limit = self._provider_limits.get(name)
+        if limit is None:
+            self._provider_active[name] = self._provider_active.get(name, 0) + 1
+            self._notify()
+            return True
+        active = self._provider_active.get(name, 0)
+        if active < limit:
+            self._provider_active[name] = active + 1
+            self._notify()
+            return True
+        return False
+
+    async def wait_provider(
+        self, names: list[str], disconnect: asyncio.Event,
+    ) -> str | None:
+        """Race-acquire a slot on any of the named providers.
+
+        Phase 1 (non-blocking): the first provider with free capacity wins,
+        in priority order.  Phase 2 (queue): when all are full, enqueue a
+        waiter on every provider whose wait queue has room and race them
+        against each other, the client-disconnect event, and a timeout.
+
+        Returns the winning provider name, or None if the client
+        disconnected.  Raises QueueOverflow when every provider's wait
+        queue is full, QueueTimeout on timeout.
+        """
+        for name in names:
+            if self.try_provider(name):
+                return name
+
+        entries: list[tuple[str, asyncio.Future[None]]] = []
+        for name in names:
+            waiters = self._provider_waiters.get(name)
+            if waiters is None:
+                waiters = deque()
+                self._provider_waiters[name] = waiters
+            if len(waiters) < self._max_waiting:
+                fut = asyncio.get_running_loop().create_future()
+                waiters.append(fut)
+                entries.append((name, fut))
+
+        if not entries:
+            raise QueueOverflow()
+        self._notify()
+
+        disc_task = asyncio.ensure_future(disconnect.wait())
+        futs = [f for _, f in entries] + [disc_task]
+        try:
+            await asyncio.wait(
+                futs, timeout=self._timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            for name, fut in entries:
+                self._cancel_provider_waiter(name, fut)
+            if not disc_task.done():
+                disc_task.cancel()
+            raise
+
+        winner: str | None = None
+        for name, fut in entries:
+            if winner is None and fut.done() and not fut.cancelled():
+                winner = name
+            else:
+                self._cancel_provider_waiter(name, fut)
+
+        disconnected = disc_task.done() or disconnect.is_set()
+        if not disc_task.done():
+            disc_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await disc_task
+
+        if winner is not None and disconnected:
+            self.release_provider(winner)
+            return None
+        if winner is not None:
+            return winner
+        if disconnected:
+            return None
+        raise QueueTimeout()
+
+    def release_provider(self, name: str) -> None:
+        """Release a provider slot and promote the next waiter."""
+        active = self._provider_active.get(name, 0)
+        if active <= 0:
+            return
+        self._provider_active[name] = active - 1
+        self._promote_provider_waiters(name)
+        self._notify()
+
+    def _cancel_provider_waiter(self, name: str, fut: asyncio.Future[None]) -> None:
+        if not fut.done():
+            fut.cancel()
+        elif not fut.cancelled():
+            self.release_provider(name)
+        try:
+            self._provider_waiters[name].remove(fut)
+        except (KeyError, ValueError):
+            pass
+        self._notify()
+
+    def _promote_provider_waiters(self, name: str) -> None:
+        limit = self._provider_limits.get(name)
+        waiters = self._provider_waiters.get(name)
+        if not waiters:
+            return
+        while (limit is None or self._provider_active.get(name, 0) < limit) and waiters:
+            fut = waiters.popleft()
+            if fut.cancelled() or fut.done():
+                continue
+            self._provider_active[name] = self._provider_active.get(name, 0) + 1
+            fut.set_result(None)
+
+    def provider_inflight(self) -> dict[str, int]:
+        return dict(self._provider_active)
+
+    def provider_status(self) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for name, limit in self._provider_limits.items():
+            waiters = self._provider_waiters.get(name, ())
+            out[name] = {
+                "inflight": self._provider_active.get(name, 0),
+                "waiting": len(waiters),
+                "max_inflight": limit,
+                "max_waiting": self._max_waiting,
+                "routes": {},
+            }
+        return out

@@ -9,11 +9,13 @@ from proxen.core.sse import (
     _extract_usage,
     parse_json_usage,
 )
-from proxen.services.proxy import (
-    Proxy,
-    _filter_headers,
+from proxen.core.httputil import (
+    filter_headers,
     protocol_from_path,
     speed_metrics,
+)
+from proxen.services.proxy import (
+    Proxy,
 )
 
 
@@ -153,7 +155,7 @@ class _DummyHeaders(dict):
 
 def test_forward_headers_preserves_accept_encoding():
     """proxen preserves the client's Accept-Encoding for cache transparency."""
-    h = _filter_headers(
+    h = filter_headers(
         {"Authorization": "Bearer clientkey", "Accept-Encoding": "br, gzip, deflate"},
         provider_key="provider-secret",
     )
@@ -162,7 +164,7 @@ def test_forward_headers_preserves_accept_encoding():
 
 
 def test_forward_headers_strips_hop_by_hop():
-    h = _filter_headers(
+    h = filter_headers(
         {
             "Host": "evil",
             "Content-Length": "5",
@@ -179,9 +181,9 @@ def test_forward_headers_strips_hop_by_hop():
 def test_resp_headers_strips_encoding_and_length():
     """With auto_decompress=True the body is decoded, so the forwarded
     response must not advertise content-encoding/content-length."""
-    from proxen.services.proxy import _filter_headers
+    from proxen.core.httputil import filter_headers
 
-    out = _filter_headers(
+    out = filter_headers(
         {
             "Content-Encoding": "gzip",
             "Content-Length": "42",
@@ -204,16 +206,20 @@ def test_record_completion_flags():
     - needs_review: a cleanly completed 200 with zero usage (parser suspect);
       cancels and drops are exempt.
     """
+    from unittest.mock import MagicMock
+
     from proxen.core.sse import UsageStats
-    from proxen.services.proxy import Proxy
 
     def _call(completed, disconnected, usage=None):
-        return Proxy._record(
+        sink = MagicMock()
+        proxy = Proxy(MagicMock(), MagicMock(), MagicMock(), sink, MagicMock())
+        proxy._record(
             wall_start=0.0, model="m", upstream="u", key_id="k",
             ttft=0.0, tps=0.0, usage=usage or UsageStats(),
             status=200, duration=0.0, stream=True,
             disconnected=disconnected, completed=completed,
         )
+        return sink.enqueue.call_args.args[0]
 
     used = UsageStats(input_tokens=5, output_tokens=2)
 
@@ -358,7 +364,7 @@ def test_parse_json_usage_anthropic_count_tokens_records_zero():
 
 
 def test_forward_headers_anthropic_uses_x_api_key():
-    h = _filter_headers(
+    h = filter_headers(
         {
             "x-api-key": "client-key",
             "anthropic-version": "2023-06-01",
@@ -374,7 +380,7 @@ def test_forward_headers_anthropic_uses_x_api_key():
 
 
 def test_forward_headers_anthropic_defaults_version():
-    h = _filter_headers(
+    h = filter_headers(
         {"Content-Type": "application/json"},
         provider_key="provider-secret",
         protocol="anthropic",
@@ -384,7 +390,7 @@ def test_forward_headers_anthropic_defaults_version():
 
 
 def test_forward_headers_anthropic_strips_client_x_api_key():
-    h = _filter_headers(
+    h = filter_headers(
         {"x-api-key": "client-leaked-key"},
         provider_key="provider-secret",
         protocol="anthropic",

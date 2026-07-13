@@ -13,7 +13,7 @@ from ..core.config import Settings, load_settings
 from ..core.gate import ConcurrencyGate, KeyLimits
 from ..core.security import AuthRateLimiter, BodySizeMiddleware, SlidingWindowLimiter
 from ..services.management import Management
-from ..services.proxy import Proxy
+from ..services.proxy import AdmissionError, Proxy
 from ..services.telemetry import Database, TelemetryWriter
 from ..services.upstream import UpstreamManager
 from .auth import admin_auth_middleware
@@ -47,16 +47,31 @@ def create_app(settings: Settings | None = None) -> BodySizeMiddleware:
     db = Database(settings.db_path)
     writer = TelemetryWriter(db)
     management = Management(settings, db)
-    upstream_mgr = UpstreamManager(settings, db, management)
-    proxy = Proxy(settings, upstream_mgr, writer, management)
     gate = ConcurrencyGate(
         settings.max_inflight,
         settings.max_waiting,
         settings.queue_timeout,
     )
+    upstream_mgr = UpstreamManager(settings, db, management, gate)
+
+    # Allowlist admit hook - deny requests whose model is not in the
+    # presenting key's allowlist (absent allowlist = allow all).
+    def _allowlist_hook(ctx):
+        if not management.is_model_allowed(ctx.key_hash, ctx.model):
+            raise AdmissionError(
+                403,
+                f"model '{ctx.model}' is not available for this key",
+                type="model_access_denied",
+            )
+
+    proxy = Proxy(
+        settings, upstream_mgr, management, writer, gate,
+        admit_hooks=[_allowlist_hook],
+    )
     broadcaster = StatsBroadcaster(gate, db, writer, management, upstream_mgr)
     writer.on_flush = broadcaster.mark_dirty
     gate.set_on_change(broadcaster.mark_dirty)
+    upstream_mgr.set_on_change(broadcaster.mark_dirty)
     auth_limiter = AuthRateLimiter()
     admin_limiter = SlidingWindowLimiter(
         settings.admin_rate_limit,

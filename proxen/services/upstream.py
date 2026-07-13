@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
+from contextlib import suppress
 
 import aiohttp
 import msgspec
 
 from ..core.config import Settings, Upstream
 from ..core.contracts import UpstreamCatalog
+from ..core.gate import ConcurrencyGate, QueueOverflow, QueueTimeout
 from ..core.health import HealthCheck
 from .telemetry import Database
 
@@ -28,72 +31,52 @@ class UpstreamManager:
         settings: Settings,
         db: Database,
         catalog: UpstreamCatalog,
+        gate: ConcurrencyGate,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._settings = settings
         self._db = db
         self._catalog = catalog
+        self._gate = gate
         self._session = session
         self._models_cache: dict[str, list[dict]] = {}
-        self._provider_inflight: dict[str, int] = {}
-        self._provider_limits: dict[str, int | None] = {}
-        self._health = HealthCheck(
+        self._on_change: Callable[[], None] | None = None
+        self.health = HealthCheck(
             failure_threshold=settings.health_guard_failures,
             backoff_base=settings.health_guard_retry_delay,
         )
 
-    # ── Per-provider concurrency ─────────────────────────────────────
+    # ── Per-provider concurrency (delegates to ConcurrencyGate) ───────
+
+    def set_on_change(self, cb: Callable[[], None]) -> None:
+        self._on_change = cb
 
     def set_provider_limit(self, name: str, max_inflight: int | None) -> None:
-        self._provider_limits[name] = max_inflight
+        self._gate.set_provider_limit(name, max_inflight)
 
     def rename_provider(self, old_name: str, new_name: str) -> None:
-        for store in (self._provider_limits, self._provider_inflight):
-            if old_name in store:
-                store[new_name] = store.pop(old_name)
+        self._gate.rename_provider(old_name, new_name)
         if old_name in self._models_cache:
             self._models_cache[new_name] = self._models_cache.pop(old_name)
 
     def acquire_provider(self, name: str) -> bool:
-        """Try to acquire a provider slot. Returns True if acquired."""
-        limit = self._provider_limits.get(name)
-        current = self._provider_inflight.get(name, 0)
-        if limit is not None and current >= limit:
-            return False
-        self._provider_inflight[name] = current + 1
-        return True
+        return self._gate.try_provider(name)
+
+    async def wait_acquire_provider(
+        self, names: list[str], disconnect: asyncio.Event,
+    ) -> str | None:
+        return await self._gate.wait_provider(names, disconnect)
 
     def release_provider(self, name: str) -> None:
-        current = self._provider_inflight.get(name, 0)
-        if current <= 0:
-            log.warning("release_provider underflow for %s (current=%d)", name, current)
-            return
-        self._provider_inflight[name] = current - 1
+        self._gate.release_provider(name)
 
     def provider_inflight(self) -> dict[str, int]:
-        return dict(self._provider_inflight)
-
-    def should_try(self, upstream_name: str, model_id: str) -> bool:
-        return self._health.should_try((upstream_name, model_id))
-
-    def should_retry(self, upstream_name: str, model_id: str) -> bool:
-        return self._health.should_retry((upstream_name, model_id))
-
-    def record_failure(self, upstream_name: str, model_id: str, weight: int = 1) -> None:
-        self._health.record_failure((upstream_name, model_id), weight=weight)
-
-    def record_success(self, upstream_name: str, model_id: str) -> None:
-        self._health.record_success((upstream_name, model_id))
+        return self._gate.provider_inflight()
 
     def provider_status(self) -> dict[str, dict]:
-        out: dict[str, dict] = {}
-        for name in set(self._provider_inflight) | set(self._provider_limits):
-            out[name] = {
-                "inflight": self._provider_inflight.get(name, 0),
-                "routes": {},
-            }
-        for (name, model_id), state in self._health.failing_states().items():
-            out.setdefault(name, {"inflight": 0, "routes": {}})["routes"][model_id] = state
+        out = self._gate.provider_status()
+        for (name, model_id), state in self.health.failing_states().items():
+            out.setdefault(name, {"inflight": 0, "waiting": 0, "max_inflight": None, "max_waiting": 0, "routes": {}})["routes"][model_id] = state
         return out
 
     async def init(self) -> None:

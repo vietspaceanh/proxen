@@ -99,3 +99,9 @@ CREATE TABLE IF NOT EXISTS key_limits (
     max_tokens_window_s REAL,
     updated_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS key_models (
+    key_id INTEGER NOT NULL REFERENCES keys(id) ON DELETE CASCADE,
+    model_id TEXT NOT NULL,
+    PRIMARY KEY (key_id, model_id)
+);

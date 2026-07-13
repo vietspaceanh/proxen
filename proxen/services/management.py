@@ -138,6 +138,7 @@ class Management:
         self.keys: list[ProxenKey] = []
         self.proxen_models: dict[str, ProxenModel] = {}
         self.model_routes: dict[str, list[ModelRoute]] = {}
+        self._key_models: dict[str, set[str]] = {}
         self._touch_cache: dict[str, float] = {}
 
     @property
@@ -183,6 +184,8 @@ class Management:
             for k in self._settings.api_keys:
                 await self._db_add_key(k, "seeded")
             await self._load_keys()
+
+        await self._load_key_models()
 
         await self._load_proxen_models()
         if not self.proxen_models and self._settings.pricing:
@@ -371,6 +374,46 @@ class Management:
             "DELETE FROM key_limits WHERE key_id = ?", (key_id,)
         )
         return cur.rowcount > 0
+
+    # ---- Per-key model allowlists -------------------------------------
+
+    async def _load_key_models(self) -> None:
+        """Load allowlists into memory keyed by key hash for O(1) lookup."""
+        cur = await self._db.execute("SELECT key_id, model_id FROM key_models")
+        rows = await cur.fetchall()
+        by_key_id: dict[int, set[str]] = {}
+        for r in rows:
+            by_key_id.setdefault(r["key_id"], set()).add(r["model_id"])
+        self._key_models = {
+            self.key_hash_by_id(kid): models
+            for kid, models in by_key_id.items()
+            if self.key_hash_by_id(kid) is not None
+        }
+
+    def is_model_allowed(self, key_hash: str, model_id: str) -> bool:
+        """True if the key may use the model.  Absent allowlist = allow all."""
+        allowed = self._key_models.get(key_hash)
+        return allowed is None or model_id in allowed
+
+    async def get_key_models(self, key_id: int) -> list[str]:
+        cur = await self._db.execute(
+            "SELECT model_id FROM key_models WHERE key_id = ? ORDER BY model_id", (key_id,)
+        )
+        return [r["model_id"] for r in await cur.fetchall()]
+
+    async def set_key_models(self, key_id: int, models: list[str]) -> list[str]:
+        await self._db.execute(
+            "DELETE FROM key_models WHERE key_id = ?", (key_id,)
+        )
+        if models:
+            await self._db.executemany_commit(
+                "INSERT INTO key_models (key_id, model_id) VALUES (?, ?)",
+                [(key_id, m) for m in models],
+            )
+        else:
+            await self._db.commit()
+        await self._load_key_models()
+        return models
 
     # ---- Proxen models -------------------------------------------------
 

@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from proxen.core.config import Settings
+from proxen.core.gate import ConcurrencyGate
 from proxen.core.models import RequestRecord
 from proxen.services.telemetry import TelemetryWriter
 from proxen.services.upstream import UpstreamManager
@@ -13,8 +14,10 @@ from proxen.services.upstream import UpstreamManager
 
 def _mgr(limits: dict) -> UpstreamManager:
     """A minimal UpstreamManager with only provider-limit state populated."""
-    mgr = UpstreamManager(Settings(), MagicMock(), MagicMock())
-    mgr._provider_limits = limits
+    gate = ConcurrencyGate(max_inflight=100, max_waiting=50, timeout=120.0)
+    mgr = UpstreamManager(Settings(), MagicMock(), MagicMock(), gate)
+    for name, limit in limits.items():
+        mgr.set_provider_limit(name, limit)
     return mgr
 
 

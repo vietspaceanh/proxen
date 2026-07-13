@@ -22,8 +22,10 @@ port = 1212
 # Database file location. Relative paths resolve to this config directory.
 db_path = "data.db"
 
-# Concurrency limits (global, shared across all keys).
-# Per-key limits can be set in the dashboard Manage tab.
+# Concurrency limits. max_inflight caps total active requests; max_waiting
+# caps queued requests (both global and per-provider); queue_timeout is the
+# max wait in seconds. Per-key limits can be set in the dashboard Manage tab.
+# Set each provider's max_inflight in the dashboard or [[upstreams]].
 max_inflight = 5
 max_waiting = 50
 queue_timeout = 120
@@ -215,8 +217,8 @@ class Settings:
     model_sync_interval: float = 3600.0
     db_path: str = DEFAULT_DB_NAME
     max_body_bytes: int = 10 * 1024 * 1024
-    upstream_sock_read: float = 120.0
-    upstream_ttft_timeout: float = 30.0
+    upstream_sock_read: float = 90.0
+    upstream_ttft_timeout: float = 60.0
     trusted_hosts: str = "127.0.0.1"
     admin_rate_limit: int = 100
     admin_rate_limit_window: float = 60.0
@@ -309,8 +311,8 @@ def _build_settings(data: dict[str, Any]) -> Settings:
         model_sync_interval=float(data.get("model_sync_interval", 3600.0)),
         db_path=str(data.get("db_path", DEFAULT_DB_NAME)),
         max_body_bytes=int(data.get("max_body_bytes", 10 * 1024 * 1024)),
-        upstream_sock_read=float(data.get("upstream_sock_read", 120.0)),
-        upstream_ttft_timeout=float(data.get("upstream_ttft_timeout", 30.0)),
+        upstream_sock_read=float(data.get("upstream_sock_read", 90.0)),
+        upstream_ttft_timeout=float(data.get("upstream_ttft_timeout", 60.0)),
         trusted_hosts=str(data.get("trusted_hosts", "127.0.0.1")),
         admin_rate_limit=int(data.get("admin_rate_limit", 100)),
         admin_rate_limit_window=float(data.get("admin_rate_limit_window", 60.0)),

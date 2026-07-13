@@ -18,7 +18,9 @@ import pytest
 
 from proxen.core.config import ModelRoute, SecretStr, Settings, Upstream
 from proxen.core.gate import InflightSlot
-from proxen.services.proxy import Proxy, watch_disconnect
+from proxen.core.httputil import watch_disconnect
+from proxen.services.context import RequestContext
+from proxen.services.proxy import Proxy
 
 
 # ─── Fakes ─────────────────────────────────────────────────────────
@@ -87,7 +89,7 @@ class _FakeUpstreamResponse:
         pass
 
 
-def _make_proxy(resp, *, ttft_timeout: float = 30.0) -> tuple[Proxy, MagicMock, MagicMock, MagicMock]:
+def _make_proxy(resp, *, ttft_timeout: float = 30.0, gate=None) -> tuple[Proxy, MagicMock, MagicMock, MagicMock]:
     settings = Settings(upstream_ttft_timeout=ttft_timeout)
     upstream = Upstream(name="mock", base_url="http://mock/v1", api_key=SecretStr("key"))
 
@@ -100,30 +102,27 @@ def _make_proxy(resp, *, ttft_timeout: float = 30.0) -> tuple[Proxy, MagicMock, 
     catalog.get_model.return_value = None
 
     upstream_mgr = MagicMock()
-    upstream_mgr.should_try.return_value = True
+    upstream_mgr.health.should_try.return_value = True
     upstream_mgr.acquire_provider.return_value = True
     upstream_mgr.post = AsyncMock(return_value=resp)
 
     sink = MagicMock()
-    proxy = Proxy(settings, upstream_mgr, sink, catalog)
+    if gate is None:
+        gate = MagicMock()
+    proxy = Proxy(settings, upstream_mgr, catalog, sink, gate)
     return proxy, upstream_mgr, sink, catalog
 
 
 def _call_forward_stream(proxy, disconnect, watcher, *, body=b'{"model":"gpt-test","stream":true}'):
-    slot = InflightSlot(key_id="key-1")
-    gate = MagicMock()
-    return proxy.forward_stream(
-        raw_headers=[],
-        path="/v1/chat/completions",
-        query="",
-        body=body,
+    ctx = RequestContext(
+        key_hash="key-1",
         model="gpt-test",
-        key_id="key-1",
-        slot=slot,
-        gate=gate,
-        disconnect=disconnect,
-        watcher=watcher,
+        stream=True,
+        path="/v1/chat/completions",
+        body=body,
     )
+    ctx.slot = InflightSlot(key_id="key-1")
+    return proxy.forward_stream(ctx, disconnect, watcher)
 
 
 async def _delayed_disconnect(event: asyncio.Event, delay: float = 0.1):
@@ -214,7 +213,7 @@ async def test_disconnect_does_not_poison_health_guard():
     async for chunk in stream_gen():
         chunks.append(chunk)
 
-    upstream_mgr.record_failure.assert_not_called()
+    upstream_mgr.health.record_failure.assert_not_called()
     sink.enqueue.assert_called_once()
     assert sink.enqueue.call_args.args[0].client_disconnect is True
 
@@ -238,7 +237,7 @@ async def test_normal_completion_does_not_record_failure():
     async for _ in stream_gen():
         pass
 
-    upstream_mgr.record_failure.assert_not_called()
+    upstream_mgr.health.record_failure.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -281,7 +280,7 @@ async def test_upstream_error_not_disconnected():
         async for _ in stream_gen():
             pass
 
-    upstream_mgr.record_failure.assert_called_once_with("mock", "gpt-test", weight=1)
+    upstream_mgr.health.record_failure.assert_called_once_with(("mock", "gpt-test"), weight=1)
 
 
 # ─── Receiving-phase disconnect recording ───────────────────────────
@@ -303,17 +302,14 @@ class _StalledContent:
 
 
 def _call_forward_simple(proxy, disconnect, *, body=b'{"model":"gpt-test"}'):
-    slot = InflightSlot(key_id="key-1")
-    return proxy.forward_simple(
-        raw_headers=[],
-        path="/v1/chat/completions",
-        query="",
-        body=body,
+    ctx = RequestContext(
+        key_hash="key-1",
         model="gpt-test",
-        key_id="key-1",
-        slot=slot,
-        disconnect=disconnect,
+        path="/v1/chat/completions",
+        body=body,
     )
+    ctx.slot = InflightSlot(key_id="key-1")
+    return proxy.forward_simple(ctx, disconnect)
 
 
 @pytest.mark.asyncio
@@ -427,14 +423,15 @@ async def test_streaming_sets_slot_ttft():
     watcher = asyncio.create_task(
         watch_disconnect(_BlockingReceive().receive, disconnect)
     )
-    slot = InflightSlot(key_id="key-1")
 
-    result = await proxy.forward_stream(
-        raw_headers=[], path="/v1/chat/completions", query="",
-        body=b'{"model":"gpt-test","stream":true}', model="gpt-test",
-        key_id="key-1", slot=slot, gate=MagicMock(),
-        disconnect=disconnect, watcher=watcher,
+    ctx = RequestContext(
+        key_hash="key-1", model="gpt-test", stream=True,
+        path="/v1/chat/completions", body=b'{"model":"gpt-test","stream":true}',
     )
+    ctx.slot = InflightSlot(key_id="key-1")
+    slot = ctx.slot
+
+    result = await proxy.forward_stream(ctx, disconnect, watcher)
     _, _, stream_gen = result
 
     async for _ in stream_gen():
@@ -477,24 +474,25 @@ async def test_phase_change_notifies_gate():
         b'data: [DONE]\n\n',
     ]
     resp = _FakeUpstreamResponse(chunks=chunks_data)
-    proxy, _, _, _ = _make_proxy(resp)
-
     gate = ConcurrencyGate(max_inflight=5, max_waiting=10, timeout=10.0)
-    notifies = []
+    notifies: list[int] = []
     gate.set_on_change(lambda: notifies.append(1))
-
     slot = await gate.acquire("key-1")
+
+    proxy, _, _, _ = _make_proxy(resp, gate=gate)
+
     disconnect = asyncio.Event()
     watcher = asyncio.create_task(
         watch_disconnect(_BlockingReceive().receive, disconnect)
     )
 
-    result = await proxy.forward_stream(
-        raw_headers=[], path="/v1/chat/completions", query="",
-        body=b'{"model":"gpt-test","stream":true}', model="gpt-test",
-        key_id="key-1", slot=slot, gate=gate,
-        disconnect=disconnect, watcher=watcher,
+    ctx = RequestContext(
+        key_hash="key-1", model="gpt-test", stream=True,
+        path="/v1/chat/completions", body=b'{"model":"gpt-test","stream":true}',
     )
+    ctx.slot = slot
+
+    result = await proxy.forward_stream(ctx, disconnect, watcher)
     _, _, stream_gen = result
     async for _ in stream_gen():
         pass

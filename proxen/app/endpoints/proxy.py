@@ -6,12 +6,14 @@ import time
 from contextlib import suppress
 
 from blacksheep import Content, Request, Response, StreamedContent
-import msgspec
 
-from ...core.gate import ConcurrencyGate, QueueOverflow, QueueTimeout, RateLimitExceeded
+from ...core.gate import QueueOverflow, QueueTimeout, RateLimitExceeded
+from ...core.httputil import watch_disconnect
+from ...core.jsonpeek import peek_model_stream
 from ...core.security import AuthRateLimiter
 from ...services.management import Management
-from ...services.proxy import Proxy, ProxyError, watch_disconnect
+from ...services.context import AdmissionError, ProxyError, RequestContext
+from ...services.proxy import Proxy
 from ..auth import authenticate
 from ..http import error_json, json_response
 from . import get, post
@@ -27,7 +29,6 @@ async def health() -> Response:
 async def _handle(
     request: Request,
     proxy: Proxy,
-    gate: ConcurrencyGate,
     management: Management,
     auth_limiter: AuthRateLimiter,
 ) -> Response:
@@ -36,7 +37,7 @@ async def _handle(
     auth_result = authenticate(request, management, auth_limiter)
     if isinstance(auth_result, Response):
         return auth_result
-    key_id = auth_result
+    key_hash = auth_result
 
     body = await request.read()
 
@@ -52,18 +53,40 @@ async def _handle(
             with suppress(asyncio.CancelledError, Exception):
                 await watcher
 
-    # Extract model/stream (throwaway decode; body bytes forwarded as-is).
-    try:
-        payload = msgspec.json.decode(body) if body else {}
-    except (msgspec.DecodeError, ValueError):
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    model = str(payload.get("model", "") or "")
-    stream = bool(payload.get("stream", False))
+    # Fast model/stream extraction (no full body decode).
+    model, stream = peek_model_stream(body)
 
+    raw_headers = list(request.headers)
+    path = request.path
+    url_query = request.url.query
+    query = (
+        url_query.decode()
+        if isinstance(url_query, bytes)
+        else (url_query or "")
+    )
+    if isinstance(path, (bytes, bytearray)):
+        path = path.decode("utf-8", "replace")
+
+    ctx = RequestContext(
+        key_hash=key_hash,
+        model=model,
+        stream=stream,
+        path=path,
+        query=query,
+        body=body,
+        raw_headers=raw_headers,
+    )
+
+    # ── Admission hooks (before any resource is acquired) ──────────
     try:
-        slot = await gate.acquire(key_id)
+        proxy.admit(ctx)
+    except AdmissionError as exc:
+        await stop_watcher()
+        return error_json(exc.status, exc.message)
+
+    # ── Global concurrency gate ────────────────────────────────────
+    try:
+        await proxy.acquire(ctx)
     except QueueOverflow:
         await stop_watcher()
         return error_json(429, "Queue is full (too many waiting requests)")
@@ -76,24 +99,15 @@ async def _handle(
 
     # Check if client disconnected during queue wait.
     if disconnect.is_set():
-        gate.release(slot)
+        proxy.release(ctx)
         await stop_watcher()
         return error_json(499, "client disconnected")
-
-    raw_headers = list(request.headers)
-    path = request.path
-    query = (
-        request.url.query.decode()
-        if isinstance(request.url.query, bytes)
-        else (request.url.query or "")
-    )
 
     gate_released = False
     try:
         if stream:
             result = await proxy.forward_stream(
-                raw_headers, path, query, body, model, key_id,
-                slot, gate, disconnect, watcher,
+                ctx, disconnect, watcher,
             )
             if result is None:
                 return error_json(499, "client disconnected")
@@ -114,8 +128,7 @@ async def _handle(
             )
         else:
             result = await proxy.forward_simple(
-                raw_headers, path, query, body, model, key_id,
-                slot, disconnect,
+                ctx, disconnect,
             )
             if result is None:
                 return error_json(499, "client disconnected")
@@ -131,6 +144,10 @@ async def _handle(
                 Content(content_type, body_content),
             )
 
+    except QueueOverflow:
+        return error_json(429, "Provider queue is full")
+    except QueueTimeout:
+        return error_json(408, "Request timed out waiting for upstream")
     except ProxyError as exc:
         return error_json(exc.status, str(exc))
     except Exception:
@@ -138,7 +155,7 @@ async def _handle(
         return error_json(500, "internal error")
     finally:
         if not gate_released:
-            gate.release(slot)
+            proxy.release(ctx)
             await stop_watcher()
 
 

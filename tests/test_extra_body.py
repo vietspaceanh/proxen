@@ -2,28 +2,28 @@ from __future__ import annotations
 
 import pytest
 
-from proxen.services.proxy import _merge_extra_body
+from proxen.core.httputil import merge_extra_body
 
 
-# ─── _merge_extra_body unit tests ────────────────────────────────────
+# ─── merge_extra_body unit tests ────────────────────────────────────
 
 
 def test_merge_fills_missing_keys():
     payload = {"model": "m", "messages": []}
-    _merge_extra_body(payload, {"reasoning_effort": "high", "temperature": 0.7})
+    merge_extra_body(payload, {"reasoning_effort": "high", "temperature": 0.7})
     assert payload["reasoning_effort"] == "high"
     assert payload["temperature"] == 0.7
 
 
 def test_merge_client_value_wins():
     payload = {"model": "m", "reasoning_effort": "low"}
-    _merge_extra_body(payload, {"reasoning_effort": "high"})
+    merge_extra_body(payload, {"reasoning_effort": "high"})
     assert payload["reasoning_effort"] == "low"
 
 
 def test_merge_reserved_keys_skipped():
     payload = {"model": "client-model", "stream": False}
-    _merge_extra_body(payload, {"model": "override", "stream": True, "temperature": 0.5})
+    merge_extra_body(payload, {"model": "override", "stream": True, "temperature": 0.5})
     assert payload["model"] == "client-model"
     assert payload["stream"] is False
     assert payload["temperature"] == 0.5
@@ -32,20 +32,20 @@ def test_merge_reserved_keys_skipped():
 def test_merge_deep_copies_values():
     extra = {"metadata": {"trace_id": "abc"}}
     payload: dict = {}
-    _merge_extra_body(payload, extra)
+    merge_extra_body(payload, extra)
     payload["metadata"]["trace_id"] = "xyz"
     assert extra["metadata"]["trace_id"] == "abc"
 
 
 def test_merge_empty_extra_body_is_noop():
     payload = {"model": "m"}
-    _merge_extra_body(payload, {})
+    merge_extra_body(payload, {})
     assert payload == {"model": "m"}
 
 
 def test_merge_none_payload_key_not_overwritten():
     payload = {"temperature": None}
-    _merge_extra_body(payload, {"temperature": 0.7})
+    merge_extra_body(payload, {"temperature": 0.7})
     assert payload["temperature"] is None
 
 

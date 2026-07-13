@@ -308,6 +308,48 @@ async def clear_key_limits(
     return json_response({"key_id": key_id, "cleared": True})
 
 
+# ─── Per-key model allowlists ───────────────────────────────────────
+
+
+class KeyModelsIn(msgspec.Struct):
+    models: list[str]
+
+
+@get("/api/management/keys/{key_id}/models")
+async def get_key_models(
+    key_id: int,
+    management: Management,
+) -> Response:
+    if management.key_hash_by_id(key_id) is None:
+        return error_json(404, f"key {key_id} not found")
+    models = await management.get_key_models(key_id)
+    return json_response({"key_id": key_id, "models": models})
+
+
+@put("/api/management/keys/{key_id}/models")
+async def set_key_models(
+    body: FromBytes,
+    key_id: int,
+    management: Management,
+) -> Response:
+    if management.key_hash_by_id(key_id) is None:
+        return error_json(404, f"key {key_id} not found")
+    data = _decode_body(body.value, KeyModelsIn)
+    models = await management.set_key_models(key_id, data.models)
+    return json_response({"key_id": key_id, "models": models})
+
+
+@delete("/api/management/keys/{key_id}/models")
+async def clear_key_models(
+    key_id: int,
+    management: Management,
+) -> Response:
+    if management.key_hash_by_id(key_id) is None:
+        return error_json(404, f"key {key_id} not found")
+    await management.set_key_models(key_id, [])
+    return json_response({"key_id": key_id, "cleared": True})
+
+
 @get("/api/management/models")
 async def list_models(management: Management) -> Response:
     return json_response({"data": await management.list_proxen_models()})
