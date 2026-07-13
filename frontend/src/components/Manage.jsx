@@ -6,6 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Input } from "./ui/input";
 import { Field as UIField, FieldLabel, FieldError } from "./ui/field";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { SearchableSelect } from "./ui/searchable-select";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -51,7 +52,7 @@ function FormDialog({ title, onClose, children, footer, className }) {
     <Dialog open={open} onOpenChange={(o) => { if (!o) { setOpen(false); setTimeout(onClose, 150); } }}>
       <DialogContent className={className}>
         <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
-        <div className="grid gap-3 py-1 overflow-y-auto max-h-[calc(80vh-8rem)] scrollbar-thin">{children}</div>
+        <div className="grid gap-3 py-1 px-1 overflow-y-auto max-h-[calc(80vh-8rem)] scrollbar-thin">{children}</div>
         {footer && <DialogFooter>{footer}</DialogFooter>}
       </DialogContent>
     </Dialog>
@@ -116,15 +117,16 @@ function RouteEditor({ route, index, upstreams, availableModels, onProviderChang
         <UIField>
           <FieldLabel>Upstream Model ID</FieldLabel>
           <div className="flex gap-1.5">
-            <Select key={route.upstream_name} value={route.upstream_model_id || undefined} onValueChange={(v) => onModelChange(index, v)} disabled={!route.upstream_name}>
-              <SelectTrigger className="flex-1"><SelectValue placeholder={route.upstream_name ? "select model" : "select provider first"}>{route.upstream_model_id}</SelectValue></SelectTrigger>
-              <SelectContent position="popper">
-                {providerModels.map((m) => <SelectItem key={m.id} value={m.id}>{m.id}</SelectItem>)}
-                {providerModels.length === 0 && route.upstream_name && (
-                  <div className="px-1.5 py-1 text-[0.75rem] italic text-muted-foreground/80">No models in cache</div>
-                )}
-              </SelectContent>
-            </Select>
+            <SearchableSelect
+              key={route.upstream_name}
+              value={route.upstream_model_id || undefined}
+              onValueChange={(v) => onModelChange(index, v)}
+              options={providerModels.map((m) => ({ value: m.id, label: m.id }))}
+              placeholder={route.upstream_name ? "select model" : "select provider first"}
+              disabled={!route.upstream_name}
+              emptyText={route.upstream_name ? "No models in cache" : undefined}
+              className="flex-1"
+            />
             <Button variant="outline" size="icon" className="shrink-0" disabled={!route.upstream_name || fetching} onClick={() => onFetch(route.upstream_name)} title={fetching ? "Fetching..." : "Fetch models from provider"}>
               <RefreshCw className={fetching ? "animate-spin" : ""} />
             </Button>
@@ -935,6 +937,7 @@ function ImportModelsModal({ upstreams, existingModelIds, onClose, onDone }) {
   const [checked, setChecked] = useState(new Set());
   const [proxenIds, setProxenIds] = useState({});
   const [importing, setImporting] = useState(false);
+  const [importSearch, setImportSearch] = useState("");
 
   const applyModels = (name, models) => {
     setCache((c) => ({ ...c, [name]: models }));
@@ -962,6 +965,8 @@ function ImportModelsModal({ upstreams, existingModelIds, onClose, onDone }) {
   }, []);
 
   const models = cache[activeTab] || [];
+  const q = importSearch.toLowerCase();
+  const filteredModels = q ? models.filter((m) => m.id.toLowerCase().includes(q)) : models;
   const getProxenId = (upstreamId) => proxenIds[upstreamId] || upstreamId;
   const isExisting = (upstreamId) => existingModelIds.includes(getProxenId(upstreamId));
 
@@ -975,7 +980,7 @@ function ImportModelsModal({ upstreams, existingModelIds, onClose, onDone }) {
     });
   };
 
-  const importable = models.filter((m) => !isExisting(m.id));
+  const importable = filteredModels.filter((m) => !isExisting(m.id));
   const allChecked = importable.length > 0 && importable.every((m) => checked.has(m.id));
   const toggleAll = () => {
     setChecked((prev) => {
@@ -1045,10 +1050,10 @@ function ImportModelsModal({ upstreams, existingModelIds, onClose, onDone }) {
 
       <div className="flex items-center justify-between mb-2">
         <span className="text-muted-foreground text-[0.76rem]">
-          {models.length} models available
+          {filteredModels.length} of {models.length} models
         </span>
         <div className="flex gap-1.5">
-          <Button variant="outline" size="xs" onClick={toggleAll} disabled={models.length === 0}>
+          <Button variant="outline" size="xs" onClick={toggleAll} disabled={filteredModels.length === 0}>
             {allChecked ? "Deselect All" : "Select All"}
           </Button>
           <Button variant="outline" size="xs" onClick={() => fetchProvider(activeTab)} disabled={fetching}>
@@ -1057,10 +1062,20 @@ function ImportModelsModal({ upstreams, existingModelIds, onClose, onDone }) {
         </div>
       </div>
 
+      <Input
+        type="text"
+        placeholder="Search models…"
+        value={importSearch}
+        onChange={(e) => setImportSearch(e.target.value)}
+        className="h-7 mb-2 text-[0.82rem]"
+      />
+
       <div className="h-[400px] overflow-auto space-y-1.5">
         {models.length === 0
           ? <p className="text-muted-foreground text-center py-5 text-[0.83rem]">No models. Click Fetch to sync from provider.</p>
-          : models.map((m) => {
+          : filteredModels.length === 0
+            ? <p className="text-muted-foreground text-center py-5 text-[0.83rem]">No models match your search.</p>
+            : filteredModels.map((m) => {
             const upstreamId = m.id;
             const proxenId = getProxenId(upstreamId);
             const exists = isExisting(upstreamId);
