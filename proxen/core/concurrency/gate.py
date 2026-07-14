@@ -160,22 +160,27 @@ class GlobalGate:
     # ── Snapshot / config ──────────────────────────────────────────
 
     def snapshot(self) -> GateSnapshot:
-        inflight = [
-            {
-                "id": s.seq_id,
-                "model": s.model or "",
-                "upstream": s.upstream or "",
-                "started_at": int(s.wall_start * 1000),
-                "key_id": s.key_id,
-                "no_signal": s._idle_notified,
-                "ttft": s.ttft,
-                "phase": s.phase,
-            }
-            for s in self.inflight.values()
-        ]
+        inflight = []
+        queued = 0
+        for s in self.inflight.values():
+            if s.phase == "queued":
+                queued += 1
+            else:
+                inflight.append(
+                    {
+                        "id": s.seq_id,
+                        "model": s.model or "",
+                        "upstream": s.upstream or "",
+                        "started_at": int(s.wall_start * 1000),
+                        "key_id": s.key_id,
+                        "no_signal": s._idle_notified,
+                        "ttft": s.ttft,
+                        "phase": s.phase,
+                    }
+                )
         return GateSnapshot(
-            active=self.active,
-            waiting=len(self.waiters),
+            active=len(inflight),
+            waiting=len(self.waiters) + queued,
             max_inflight=self.max_inflight,
             max_waiting=self.max_waiting,
             inflight=inflight,

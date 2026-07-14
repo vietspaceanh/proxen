@@ -499,3 +499,66 @@ async def test_phase_change_notifies_gate():
     assert slot.ttft > 0.0
     # acquire + phase-transition + first-byte TTFT (release may add one more)
     assert len(notifies) >= 3
+
+
+@pytest.mark.asyncio
+async def test_provider_queue_shows_as_waiting_not_inflight():
+    """When the provider is full, a queued request is reported as waiting
+    (phase=queued), excluded from the inflight table. After a slot frees
+    and the waiter is promoted, it transitions to inflight."""
+    from proxen.core.concurrency import ConcurrencyGate
+
+    gate = ConcurrencyGate(max_inflight=5, max_waiting=5, timeout=10.0)
+    gate.set_provider_limit("mock", 1)
+    resp = _FakeUpstreamResponse(chunks=[b"data: chunk1\n\n", b"data: [DONE]\n\n"])
+    proxy, upstream_mgr, _, _ = _make_proxy(resp, gate=gate)
+    # Route provider concurrency through the real gate (not the MagicMock).
+    upstream_mgr.gate = gate
+
+    # Pre-fill the sole provider slot so the next request must queue.
+    assert gate.try_provider("mock") is True
+
+    slot = await gate.acquire("key-1")
+    slot.model = "gpt-test"
+
+    disconnect = asyncio.Event()
+    watcher = asyncio.create_task(
+        watch_disconnect(_BlockingReceive().receive, disconnect)
+    )
+    ctx = RequestContext(
+        key_hash="key-1", model="gpt-test", stream=True,
+        path="/v1/chat/completions", body=b'{"model":"gpt-test","stream":true}',
+    )
+    ctx.slot = slot
+
+    fwd_task = asyncio.create_task(proxy.forward_stream(ctx, disconnect, watcher))
+    # Let the request reach wait_provider and mark itself queued.
+    await asyncio.sleep(0.05)
+
+    snap = gate.snapshot()
+    assert len(snap.inflight) == 0
+    assert snap.active == 0
+    assert snap.waiting == 1
+    assert slot.phase == "queued"
+
+    # Free the provider slot -> waiter is promoted and the route proceeds.
+    gate.release_provider("mock")
+    result = await asyncio.wait_for(fwd_task, 2.0)
+    assert result is not None
+
+    snap = gate.snapshot()
+    assert len(snap.inflight) == 1
+    assert snap.active == 1
+    assert snap.waiting == 0
+    assert slot.phase == "receiving"
+
+    # Drain the stream so resources are released.
+    _, _, stream_gen = result
+    async for _ in stream_gen():
+        pass
+
+    assert gate.snapshot().active == 0
+    if not watcher.done():
+        watcher.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await watcher

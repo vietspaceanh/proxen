@@ -338,6 +338,8 @@ class Router:
 
         if held is None and full:
             names = [r.upstream_name for r, _ in full]
+            if slot is not None:
+                slot.mark_queued()
             name = await self.upstream_mgr.gate.wait_provider(names, disconnect)
             if name is None:
                 self.release_held(held)
@@ -350,6 +352,8 @@ class Router:
                 self.upstream_mgr.gate.release_provider(name)
                 ctx.provider = ""
             else:
+                if slot is not None:
+                    slot.mark_requesting()
                 r = await self.attempt_route(ctx, route, upstream, body_or_payload, **kw)
                 upstream_name = r.upstream_name
                 if r.ok:

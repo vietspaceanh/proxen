@@ -142,6 +142,16 @@ class InflightSlot:
         if cb is not None:
             cb()
 
+    def mark_queued(self) -> None:
+        """Transition to the queued phase (waiting on a provider slot)."""
+        self.phase = "queued"
+        self.notify()
+
+    def mark_requesting(self) -> None:
+        """Transition to the requesting phase (provider slot acquired)."""
+        self.phase = "requesting"
+        self.notify()
+
     def mark_receiving(self) -> None:
         self.phase = "receiving"
         self.notify()

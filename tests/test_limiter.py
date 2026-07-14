@@ -300,6 +300,33 @@ async def test_snapshot_includes_started_at_and_no_signal():
 
 
 @pytest.mark.asyncio
+async def test_queued_slot_excluded_from_inflight_counted_as_waiting():
+    """A slot waiting on a provider slot (phase=queued) is excluded from the
+    inflight list and counted in waiting instead of active."""
+    gate = ConcurrencyGate(max_inflight=5, max_waiting=5, timeout=1.0)
+    active_slot = await gate.acquire("k1")
+    queued_slot = await gate.acquire("k2")
+    queued_slot.mark_queued()
+
+    snap = gate.snapshot()
+    assert len(snap.inflight) == 1            # only the active slot
+    assert snap.inflight[0]["id"] == active_slot.seq_id
+    assert snap.active == 1                    # processing count, not admitted
+    assert snap.waiting == 1                    # provider-queued slot
+    assert gate._global.active == 2            # internal admitted counter unchanged
+
+    queued_slot.mark_requesting()
+    snap = gate.snapshot()
+    assert len(snap.inflight) == 2
+    assert snap.active == 2
+    assert snap.waiting == 0
+
+    gate.release(active_slot)
+    gate.release(queued_slot)
+    assert gate.snapshot().active == 0
+
+
+@pytest.mark.asyncio
 async def test_on_change_fires_on_acquire_and_release():
     """The dashboard broadcast hook is invoked on both acquire and release."""
     gate = ConcurrencyGate(max_inflight=5, max_waiting=5, timeout=1.0)

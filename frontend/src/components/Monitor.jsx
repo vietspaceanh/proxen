@@ -227,8 +227,10 @@ function MonitorImpl({ stats, theme }) {
             {gate.active || 0}<span className="text-muted-foreground text-[0.95rem] font-normal"> / {gate.max_inflight || 5}</span>
           </div>
         </StatCard>
-        <StatCard label="Waiting">
-          <div className="text-[1.55rem] font-semibold mt-1.5 tracking-tight">{gate.waiting || 0}<span className="text-muted-foreground text-[0.95rem] font-normal"> / {gate.max_waiting || 50}</span></div>
+        <StatCard label={<>Waiting{gate.waiting > 0 && <span className="inline-block w-[7px] h-[7px] rounded-full ml-1.5 align-middle heartbeat" style={{ background: "var(--warning)" }} />}</>} active={gate.waiting > 0}>
+          <div className={"text-[1.55rem] font-semibold mt-1.5 tracking-tight" + (gate.waiting > 0 ? " text-[--warning]" : "")}>
+            {gate.waiting || 0}<span className="text-muted-foreground text-[0.95rem] font-normal"> / {gate.max_waiting || 50}</span>
+          </div>
         </StatCard>
         <StatCard label="Total Requests">
           <div className="text-[1.55rem] font-semibold mt-1.5 tracking-tight">{fmt(totals.total_requests || 0, 0)}</div>
