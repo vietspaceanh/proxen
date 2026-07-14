@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 
-from proxen.core.config import Upstream
-from proxen.services.proxy import Proxy
-from proxen.services.proxy.routing import Router
+from proxen.core.config import ModelRoute, SecretStr, Upstream
+from proxen.services.proxy import Proxy, RequestContext, Router
 
 KEY = {"Authorization": "Bearer gw-secret"}
 ADM = {"Authorization": "Bearer admin-secret"}
@@ -600,6 +601,53 @@ def test_404_does_not_trip_health_guard(app_client, mock_upstream):
         assert r.status_code == 404
     stats = app_client.get("/api/stats", headers=ADM).json()
     assert stats["providers"]["v9h"]["routes"] == {}
+
+
+@pytest.mark.asyncio
+async def test_single_usable_route_bypasses_poisoned_health_guard():
+    """A model with multiple routes but only one usable (the rest disabled)
+    must bypass the health guard for that lone route - there is no
+    alternative to fall back to, so blocking it only rejects requests that
+    have nowhere else to go.
+
+    Regression: ``single`` was derived from ``len(ctx.routes)`` which counts
+    disabled routes, so the only working provider could be circuit-broken
+    and subsequent requests short-circuited to a synthetic 502 without ever
+    contacting the upstream.
+    """
+    upstream = Upstream(name="mock", base_url="http://mock/v1", api_key=SecretStr("k"))
+
+    management = MagicMock()
+    management.get_upstream.return_value = upstream
+
+    upstream_mgr = MagicMock()
+    # Guard fully tripped: neither pass would allow a try.
+    upstream_mgr.health.should_try.return_value = False
+    upstream_mgr.health.should_retry.return_value = False
+    upstream_mgr.gate.try_provider.return_value = True
+
+    fake_resp = MagicMock()
+    fake_resp.status = 200
+    fake_resp.headers = {}
+    upstream_mgr.post = AsyncMock(return_value=fake_resp)
+
+    router = Router(management, upstream_mgr)
+    ctx = RequestContext(
+        model="gpt-test",
+        path="/v1/chat/completions",
+        routes=[
+            ModelRoute(upstream_name="mock", upstream_model_id="gpt-test", enabled=True),
+            ModelRoute(upstream_name="mock", upstream_model_id="gpt-test", enabled=False),
+        ],
+    )
+
+    await router.try_routes(
+        ctx, b'{"model":"gpt-test"}', asyncio.Event(),
+        simple_timeout=aiohttp.ClientTimeout(total=5),
+    )
+
+    # The lone usable route was attempted despite the poisoned guard.
+    upstream_mgr.post.assert_called_once()
 
 
 def test_fallback_uses_each_route_model_id(app_client, mock_upstream):

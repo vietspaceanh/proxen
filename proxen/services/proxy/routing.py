@@ -265,8 +265,11 @@ class Router:
         queuing.
 
         Routes are filtered and ordered inline: healthy first
-        (`should_try`), then probing (`should_retry`).  Single-route
-        models bypass health checking (no alternative to try).
+        (`should_try`), then probing (`should_retry`).  Models with a
+        single usable route bypass health checking - there is no
+        alternative to fall back to, so blocking would only reject
+        requests that have nowhere else to go.  Disabled routes and
+        routes whose upstream is disabled do not count toward usable.
 
         Phase 1 (non-blocking): iterate routes in order.  For each,
         `acquire_provider` (non-blocking).  The first with capacity is
@@ -286,13 +289,19 @@ class Router:
 
         healthy: list[tuple[ModelRoute, Upstream]] = []
         probing: list[tuple[ModelRoute, Upstream]] = []
-        single = len(ctx.routes) <= 1
+        usable: list[tuple[ModelRoute, Upstream]] = []
         for r in ctx.routes:
             if not r.enabled:
                 continue
             u = self.management.get_upstream(r.upstream_name)
             if u is None or not u.enabled:
                 continue
+            usable.append((r, u))
+        # With only one usable route there is no alternative to fall back
+        # to, so the health guard is bypassed - blocking it would only
+        # reject requests that have nowhere else to go.
+        single = len(usable) <= 1
+        for r, u in usable:
             if single or self.upstream_mgr.health.should_try((u.name, r.upstream_model_id)):
                 healthy.append((r, u))
             elif self.upstream_mgr.health.should_retry((u.name, r.upstream_model_id)):
