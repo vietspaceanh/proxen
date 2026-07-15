@@ -17,7 +17,8 @@ def _make_gate(max_inflight=2, max_waiting=10, timeout=2.0):
 # ─── Provider primitives ─────────────────────────────────────────────
 
 
-def test_try_provider_respects_limit():
+@pytest.mark.asyncio
+async def test_try_provider_respects_limit():
     gate = _make_gate(max_inflight=2)
     assert gate.try_provider("p") is True
     assert gate.try_provider("p") is True

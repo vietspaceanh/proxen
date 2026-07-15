@@ -150,14 +150,15 @@ class _DummyHeaders(dict):
         return super().items()
 
 
-def test_forward_headers_preserves_accept_encoding():
-    """proxen preserves the client's Accept-Encoding for cache transparency."""
+def test_forward_headers_strips_accept_encoding():
+    """proxen strips Accept-Encoding to prevent upstream compression
+    (httpcore does not auto-decompress)."""
     h = filter_headers(
         {"Authorization": "Bearer clientkey", "Accept-Encoding": "br, gzip, deflate"},
         provider_key="provider-secret",
     )
     assert h["Authorization"] == "Bearer provider-secret"
-    assert h["Accept-Encoding"] == "br, gzip, deflate"
+    assert "Accept-Encoding" not in h
 
 
 def test_forward_headers_strips_hop_by_hop():

@@ -3,11 +3,18 @@
 Each provider has its own `max_inflight` limit and FIFO wait queue.
 `wait_provider` races waiters across multiple providers plus the
 client-disconnect event.
+
+A `release_cooldown` can be set to delay slot reuse after release.
+This is a safety net against provider-side counting lag: when a slot
+is freed (e.g. after RST_STREAM cancellation), the provider may not
+have decremented its counter yet.  The cooldown holds the slot for
+a short duration before making it available again.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
@@ -15,6 +22,8 @@ from contextlib import suppress
 from .types import QueueOverflow, QueueTimeout
 
 log = logging.getLogger(__name__)
+
+_RELEASE_COOLDOWN = 1.0
 
 
 class ProviderGate:
@@ -24,13 +33,16 @@ class ProviderGate:
     so that all queues have the same wait policy.
     """
 
-    def __init__(self, max_waiting: int, timeout: float) -> None:
+    def __init__(
+        self, max_waiting: int, timeout: float,
+    ) -> None:
         self.max_waiting = max_waiting
         self.timeout = timeout
         self.limits: dict[str, int | None] = {}
         self.active: dict[str, int] = {}
         self.waiters: dict[str, deque[asyncio.Future[None]]] = {}
         self._on_change: Callable[[], None] | None = None
+        self._pending_releases: set[asyncio.Task] = set()
 
     def set_on_change(self, cb: Callable[[], None]) -> None:
         self._on_change = cb
@@ -154,7 +166,19 @@ class ProviderGate:
             return None
         raise QueueTimeout()
 
-    def release_provider(self, name: str) -> None:
+    def release_provider(self, name: str, *, cooldown: bool = False) -> None:
+        if cooldown:
+            task = asyncio.ensure_future(self._delayed_release(name))
+            self._pending_releases.add(task)
+            task.add_done_callback(self._pending_releases.discard)
+        else:
+            self._do_release(name)
+
+    async def _delayed_release(self, name: str) -> None:
+        await asyncio.sleep(_RELEASE_COOLDOWN)
+        self._do_release(name)
+
+    def _do_release(self, name: str) -> None:
         active = self.active.get(name, 0)
         if active <= 0:
             return

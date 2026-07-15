@@ -127,8 +127,8 @@ class ConcurrencyGate:
     ) -> str | None:
         return await self._providers.wait_provider(names, disconnect)
 
-    def release_provider(self, name: str) -> None:
-        self._providers.release_provider(name)
+    def release_provider(self, name: str, *, cooldown: bool = False) -> None:
+        self._providers.release_provider(name, cooldown=cooldown)
 
     def provider_inflight(self) -> dict[str, int]:
         return self._providers.provider_inflight()

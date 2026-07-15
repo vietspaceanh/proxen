@@ -13,7 +13,7 @@ import logging
 import time
 from contextlib import suppress
 
-import aiohttp
+import httpcore
 import msgspec
 
 from ...core.sse import SSEUsageParser
@@ -27,7 +27,7 @@ class StreamForwarder(msgspec.Struct):
     parses SSE usage, records telemetry, releases resources."""
 
     proxy: object  # Proxy, typed as object to avoid circular import
-    resp: aiohttp.ClientResponse
+    resp: httpcore.Response
     ctx: RequestContext
     wall_start: float
     start: float
@@ -36,6 +36,7 @@ class StreamForwarder(msgspec.Struct):
     watcher: asyncio.Task
     upstream_name: str
     upstream_model_id: str
+    stream_iter: object = None
     released: bool = False
     gen_started: bool = False
     watch_task: asyncio.Task | None = None
@@ -44,14 +45,14 @@ class StreamForwarder(msgspec.Struct):
         """Start the background disconnect-watcher task."""
         self.watch_task = asyncio.ensure_future(self.watch())
 
-    def release(self, *, force: bool = True) -> None:
+    async def release(self) -> None:
         """Idempotent: close resp + release provider + global gate + watcher."""
         if self.released:
             return
         self.released = True
         with suppress(Exception):
-            self.resp.close() if force else self.resp.release()
-        self.proxy.release(self.ctx)
+            await self.resp.aclose()
+        self.proxy.release(self.ctx, cooldown=self.disconnect.is_set())
         if not self.watcher.done():
             self.watcher.cancel()
 
@@ -64,7 +65,7 @@ class StreamForwarder(msgspec.Struct):
                 await self.disconnect.wait()
             else:
                 log.warning("stream generator never started - releasing resources")
-        self.release()
+        await self.release()
 
     async def stream(self):
         """The async generator yielded to the HTTP framework."""
@@ -86,7 +87,26 @@ class StreamForwarder(msgspec.Struct):
                     slot.reset_idle()
                 if not self.disconnect.is_set():
                     yield self.first_chunk
-            async for chunk in self.resp.content.iter_any():
+            _stream = self.stream_iter if self.stream_iter is not None else aiter(self.resp.stream)
+            _disc_wait = asyncio.ensure_future(self.disconnect.wait())
+            while True:
+                if self.disconnect.is_set():
+                    break
+                read_task = asyncio.ensure_future(anext(_stream, None))
+                done, _pending = await asyncio.wait(
+                    {read_task, _disc_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if read_task not in done:
+                    if not read_task.done():
+                        read_task.cancel()
+                        with suppress(asyncio.CancelledError, Exception):
+                            await read_task
+                    break
+                chunk = read_task.result()
+                if chunk is None:
+                    completed = True
+                    break
                 if ttft is None:
                     ttft = time.perf_counter() - self.start
                     if slot:
@@ -95,11 +115,11 @@ class StreamForwarder(msgspec.Struct):
                 if slot:
                     slot.last_byte_time = time.monotonic()
                     slot.reset_idle()
-                if self.disconnect.is_set():
-                    break
                 yield chunk
-            else:
-                completed = True
+            if not _disc_wait.done():
+                _disc_wait.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await _disc_wait
         except Exception:
             if not self.disconnect.is_set():
                 upstream_error = True
@@ -133,7 +153,7 @@ class StreamForwarder(msgspec.Struct):
                 stream=True, disconnected=disconnected,
                 completed=completed_final,
             )
-            self.release(force=not completed)
+            await self.release()
             if not self.watcher.done():
                 with suppress(asyncio.CancelledError, Exception):
                     await self.watcher

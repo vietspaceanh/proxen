@@ -4,7 +4,7 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock
 
-import aiohttp
+import httpcore
 import pytest
 
 from proxen.core.config import ModelRoute, SecretStr, Upstream
@@ -70,7 +70,7 @@ def test_finished_request_appears_as_record(app_client):
         json={"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]},
         headers=KEY,
     )
-    time.sleep(1.2)
+    time.sleep(0.3)
     stats = app_client.get("/api/stats", headers=ADM).json()
     assert stats["gate"]["active"] == 0
     assert stats["gate"]["inflight"] == []
@@ -628,8 +628,8 @@ async def test_single_usable_route_bypasses_poisoned_health_guard():
 
     fake_resp = MagicMock()
     fake_resp.status = 200
-    fake_resp.headers = {}
-    upstream_mgr.post = AsyncMock(return_value=fake_resp)
+    fake_resp.headers = []
+    upstream_mgr.request = AsyncMock(return_value=fake_resp)
 
     router = Router(management, upstream_mgr)
     ctx = RequestContext(
@@ -643,11 +643,11 @@ async def test_single_usable_route_bypasses_poisoned_health_guard():
 
     await router.try_routes(
         ctx, b'{"model":"gpt-test"}', asyncio.Event(),
-        simple_timeout=aiohttp.ClientTimeout(total=5),
+        read_timeout=5.0,
     )
 
     # The lone usable route was attempted despite the poisoned guard.
-    upstream_mgr.post.assert_called_once()
+    upstream_mgr.request.assert_called_once()
 
 
 def test_fallback_uses_each_route_model_id(app_client, mock_upstream):

@@ -24,17 +24,6 @@ async def watch_disconnect(receive, event: asyncio.Event) -> None:
         event.set()
 
 
-async def race_disconnect(task: asyncio.Task, disconnect: asyncio.Event) -> bool:
-    """Race task against disconnect.wait(). Returns True if disconnect won."""
-    disc = asyncio.ensure_future(disconnect.wait())
-    await asyncio.wait([task, disc], return_when=asyncio.FIRST_COMPLETED)
-    if not disc.done():
-        disc.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await disc
-    return disconnect.is_set()
-
-
 # ─── Body-size middleware ───────────────────────────────────────────
 
 

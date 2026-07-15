@@ -12,12 +12,11 @@ import time
 from contextlib import suppress
 from typing import Any
 
-import aiohttp
+import httpcore
 
 from ...core.config import Settings
 from ...core.concurrency import ConcurrencyGate
 from ...core.headers import filter_headers
-from ...core.asgi import race_disconnect
 from ...core.models import RequestRecord
 from ...core.sse import UsageStats, parse_json_usage
 from .context import (
@@ -74,10 +73,10 @@ class Proxy:
         """Acquire the global concurrency slot."""
         ctx.slot = await self._gate.acquire(ctx.key_hash)
 
-    def release(self, ctx: RequestContext) -> None:
+    def release(self, ctx: RequestContext, *, cooldown: bool = False) -> None:
         """Release all held resources. Idempotent - safe in `finally`."""
         if ctx.provider:
-            self.upstream_mgr.gate.release_provider(ctx.provider)
+            self.upstream_mgr.gate.release_provider(ctx.provider, cooldown=cooldown)
             ctx.provider = ""
         if ctx.slot is not None:
             self._gate.release(ctx.slot)
@@ -159,9 +158,11 @@ class Proxy:
             if ctx.slot:
                 ctx.slot.model = ctx.model
 
-            ttft_timeout = self.settings.upstream_ttft_timeout or None
+            ttft_timeout = self.settings.upstream_ttft_timeout or 0.0
             result = await self._router.try_routes(
-                ctx, body_or_payload, disconnect, ttft_timeout=ttft_timeout,
+                ctx, body_or_payload, disconnect,
+                read_timeout=self.settings.upstream_sock_read,
+                ttft_timeout=ttft_timeout,
             )
         except ProxyError as exc:
             self._error_telemetry(
@@ -172,7 +173,7 @@ class Proxy:
         if result is None:
             return None
 
-        resp, upstream_name, upstream_model_id, start, first_chunk = result
+        resp, upstream_name, upstream_model_id, start, first_chunk, stream_iter = result
 
         fwd = StreamForwarder(
             proxy=self, resp=resp, ctx=ctx,
@@ -181,6 +182,7 @@ class Proxy:
             disconnect=disconnect, watcher=watcher,
             upstream_name=upstream_name,
             upstream_model_id=upstream_model_id,
+            stream_iter=stream_iter,
         )
         fwd.start_watch()
         return resp.status, filter_headers(resp.headers), fwd.stream
@@ -204,10 +206,7 @@ class Proxy:
 
             result = await self._router.try_routes(
                 ctx, body_or_payload, disconnect,
-                simple_timeout=aiohttp.ClientTimeout(
-                    total=self.settings.upstream_non_streaming_timeout,
-                    connect=10,
-                ),
+                read_timeout=self.settings.upstream_non_streaming_timeout,
             )
         except ProxyError as exc:
             self._error_telemetry(
@@ -218,17 +217,30 @@ class Proxy:
         if result is None:
             return None
 
-        resp, upstream_name, _upstream_model_id, start, _ = result
+        resp, upstream_name, _upstream_model_id, start, _, _ = result
 
-        read_task = asyncio.ensure_future(resp.read())
-        if await race_disconnect(read_task, disconnect):
+        # Read the response body, racing against client disconnect.
+        # httpcore's read timeout (from request extensions) handles
+        # upstream stalls.  On timeout, RST_STREAM is sent automatically.
+        read_task = asyncio.ensure_future(resp.aread())
+        disc_task = asyncio.ensure_future(disconnect.wait())
+        await asyncio.wait(
+            {read_task, disc_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not disc_task.done():
+            disc_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await disc_task
+
+        if disconnect.is_set():
             if not read_task.done():
                 read_task.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await read_task
             with suppress(Exception):
-                resp.close()
-            self.upstream_mgr.gate.release_provider(upstream_name)
+                await resp.aclose()
+            self.upstream_mgr.gate.release_provider(upstream_name, cooldown=True)
             self._cancel_telemetry(
                 wall_start, start, ctx.model, ctx.key_hash,
                 upstream_name, resp.status, stream=False,
@@ -238,10 +250,10 @@ class Proxy:
 
         try:
             content = read_task.result()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (httpcore.NetworkError, httpcore.ProtocolError, httpcore.TimeoutException) as exc:
             with suppress(Exception):
-                resp.close()
-            self.upstream_mgr.gate.release_provider(upstream_name)
+                await resp.aclose()
+            self.upstream_mgr.gate.release_provider(upstream_name, cooldown=True)
             self._error_telemetry(
                 wall_start, wall_perf, ctx.model, ctx.key_hash,
                 upstream_name, 502, stream=False,
@@ -265,7 +277,7 @@ class Proxy:
         )
 
         with suppress(Exception):
-            resp.release()
+            await resp.aclose()
         self.upstream_mgr.gate.release_provider(upstream_name)
         ctx.provider = ""
 

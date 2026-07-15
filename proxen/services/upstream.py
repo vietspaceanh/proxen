@@ -5,13 +5,16 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from urllib.parse import urlparse
 
-import aiohttp
+import httpcore
 import msgspec
 
 from ..core.config import Settings, Upstream
 from ..core.concurrency import ConcurrencyGate
 from ..core.health import HealthCheck
+# Apply RST_STREAM monkey-patch at import time.
+from ..core import http2_cancel  # noqa: F401
 from .telemetry import Database
 from .management import Management
 
@@ -19,7 +22,14 @@ log = logging.getLogger("proxen.upstream")
 
 
 class UpstreamManager:
-    """Owns the shared HTTP session and keeps the model catalog in sync."""
+    """Owns the shared HTTP/2 connection pool and keeps the model catalog
+    in sync.
+
+    Uses httpcore with HTTP/2 multiplexing.  RST_STREAM cancellation
+    (via the http2_cancel monkey-patch) ensures that timed-out or
+    disconnected requests are properly cancelled at the upstream,
+    preventing zombie requests from consuming concurrency slots.
+    """
 
     def __init__(
         self,
@@ -27,13 +37,13 @@ class UpstreamManager:
         db: Database,
         management: Management,
         gate: ConcurrencyGate,
-        session: aiohttp.ClientSession | None = None,
+        pool: httpcore.AsyncConnectionPool | None = None,
     ) -> None:
         self._settings = settings
         self._db = db
         self.management = management
         self.gate = gate
-        self._session = session
+        self._pool = pool
         self._models_cache: dict[str, list[dict]] = {}
         self._on_change: Callable[[], None] | None = None
         self.health = HealthCheck(
@@ -62,59 +72,55 @@ class UpstreamManager:
         return out
 
     async def init(self) -> None:
-        """Create the aiohttp session if one was not injected."""
-        if self._session is None:
-            self._session = aiohttp.ClientSession(
-                # No total cap: a streaming response (including reasoning
-                # tokens) must run as long as data keeps flowing, a fixed
-                # total timeout was cutting off long deep-research streams.
-                # `sock_read` instead kills only connections that receive
-                # zero bytes for that long (genuinely stalled/dead), since
-                # each received chunk resets it.
-                timeout=aiohttp.ClientTimeout(
-                    total=None,
-                    connect=10,
-                    sock_read=self._settings.upstream_sock_read,
-                ),
-                connector=aiohttp.TCPConnector(
-                    limit=100,
-                    limit_per_host=100,
-                    keepalive_timeout=30,
-                    enable_cleanup_closed=True,
-                    ttl_dns_cache=300,
-                ),
-                # auto_decompress lets aiohttp transparently decode gzip/deflate
-                # on non-streaming JSON so the upstream→proxen hop stays
-                # compressed. SSE streams carry no Content-Encoding, so this is
-                # a no-op for streaming. Response headers still strip
-                # content-encoding/content-length before forwarding.
-                auto_decompress=True,
+        """Create the httpcore connection pool if one was not injected."""
+        if self._pool is None:
+            self._pool = httpcore.AsyncConnectionPool(
+                http2=True,
+                max_connections=100,
+                max_keepalive_connections=10,
+                keepalive_expiry=30,
             )
         # Load manual models from DB so they survive restarts.
         self._models_cache["manual"] = await self.load_cached_models("manual")
 
     @property
-    def session(self) -> aiohttp.ClientSession:
-        return self._session  # type: ignore[return-value]
+    def pool(self) -> httpcore.AsyncConnectionPool:
+        if self._pool is None:
+            raise RuntimeError("UpstreamManager not initialised - call init() first")
+        return self._pool
 
-    async def post(self, url: str, **kwargs) -> aiohttp.ClientResponse:
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | list[tuple[bytes, bytes]] | None = None,
+        content: bytes | None = None,
+        read_timeout: float = 90.0,
+    ) -> httpcore.Response:
+        """Send an HTTP request via the pool with connect+read timeouts."""
+        # httpcore needs explicit host and content-length headers
+        # (it does not add them automatically like aiohttp does).
+        if isinstance(headers, dict):
+            if not any(k.lower() == "host" for k in headers):
+                headers = {**headers, "host": urlparse(url).netloc}
+            if content is not None and not any(
+                k.lower() == "content-length" for k in headers
+            ):
+                headers = {**headers, "content-length": str(len(content))}
+        req = httpcore.Request(
+            method,
+            url,
+            headers=headers,
+            content=content,
+            extensions={"timeout": {"connect": 10.0, "read": read_timeout}},
+        )
         try:
-            return await self.session.post(url, **kwargs)
-        except aiohttp.ClientConnectorError:
-            log.info("upstream POST connection failed, retrying on fresh connection")
+            return await self.pool.handle_async_request(req)
+        except httpcore.ConnectError:
+            log.info("upstream connection failed, retrying on fresh connection")
             await asyncio.sleep(0.05)
-            return await self.session.post(url, **kwargs)
-        except asyncio.TimeoutError:
-            # `sock_read` timeout: the upstream received the request but
-            # sent no data within the read window. aiohttp closes the
-            # connection, but the TCP close may not have reached the
-            # upstream yet. Brief pause so the upstream detects the close
-            # before the caller releases the provider slot and sends a
-            # new request - otherwise the upstream briefly sees an extra
-            # concurrent connection.
-            log.info("upstream POST timed out (sock_read), pausing before release")
-            await asyncio.sleep(0.5)
-            raise
+            return await self.pool.handle_async_request(req)
 
     def all_enabled(self) -> list[Upstream]:
         return self.management.enabled_upstreams()
@@ -154,13 +160,19 @@ class UpstreamManager:
                 headers = {
                     "Authorization": f"Bearer {upstream.api_key.get_secret_value()}"
                 }
-                async with self.session.get(url, headers=headers) as resp:
+                resp = await self.request(
+                    "GET", url, headers=headers, read_timeout=30.0,
+                )
+                try:
                     if resp.status != 200:
                         log.warning(
                             "model sync from %s returned %s", upstream.name, resp.status
                         )
                         continue
-                    data = await resp.json()
+                    body = await resp.aread()
+                    data = msgspec.json.decode(body)
+                finally:
+                    await resp.aclose()
                 models = data.get("data", []) if isinstance(data, dict) else []
                 self._models_cache[upstream.name] = models
                 await self.replace_cached_models(upstream.name, models)
@@ -183,9 +195,9 @@ class UpstreamManager:
                 log.exception("model sync loop crashed, will retry next cycle")
 
     async def aclose(self) -> None:
-        if self._session is not None:
-            await self._session.close()
-            self._session = None
+        if self._pool is not None:
+            await self._pool.aclose()
+            self._pool = None
 
     async def load_cached_models(self, upstream: str) -> list[dict]:
         async with await self._db.execute(

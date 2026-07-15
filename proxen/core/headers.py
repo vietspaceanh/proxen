@@ -9,9 +9,10 @@ _HOP_BY_HOP = {
     "keep-alive",
     "authorization",
     "x-api-key",
+    "accept-encoding",
 }
 
-_RESP_STRIP = _HOP_BY_HOP | {"content-encoding", "accept-encoding"}
+_RESP_STRIP = _HOP_BY_HOP | {"content-encoding"}
 
 
 def protocol_from_path(path) -> str:

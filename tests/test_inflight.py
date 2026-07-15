@@ -24,7 +24,8 @@ def _mgr(limits: dict) -> UpstreamManager:
 # ─── Provider concurrency slots (release correctness) ────────────
 
 
-def test_provider_slot_acquire_release_cycle():
+@pytest.mark.asyncio
+async def test_provider_slot_acquire_release_cycle():
     mgr = _mgr({"p": 2})
     assert mgr.gate.try_provider("p") is True
     assert mgr.gate.try_provider("p") is True
@@ -48,7 +49,8 @@ def test_provider_slot_no_limit_means_unbounded():
 # ─── release_provider bare decrement ───────────────────────────────
 
 
-def test_release_provider_bare_decrement():
+@pytest.mark.asyncio
+async def test_release_provider_bare_decrement():
     """release_provider is a bare decrement guarded against underflow."""
     mgr = _mgr({"p": 2})
 
