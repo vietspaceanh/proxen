@@ -29,6 +29,8 @@ class GlobalGate:
 
     Beyond both limits, `acquire` raises :class:`QueueOverflow`.  Waiters
     are FIFO and time out after `timeout` seconds with :class:`QueueTimeout`.
+    A `timeout` of 0 disables the wait timeout (waiters queue indefinitely
+    until a slot frees or the client disconnects).
     """
 
     def __init__(
@@ -41,8 +43,8 @@ class GlobalGate:
             raise ValueError("max_inflight must be >= 1")
         if max_waiting < 0:
             raise ValueError("max_waiting must be >= 0")
-        if timeout <= 0:
-            raise ValueError("timeout must be > 0")
+        if timeout < 0:
+            raise ValueError("timeout must be >= 0")
         self.max_inflight = max_inflight
         self.max_waiting = max_waiting
         self.timeout = timeout
@@ -119,7 +121,10 @@ class GlobalGate:
         self._notify()
 
         try:
-            await asyncio.wait_for(asyncio.shield(future), self.timeout)
+            if self.timeout > 0:
+                await asyncio.wait_for(asyncio.shield(future), self.timeout)
+            else:
+                await asyncio.shield(future)
         except asyncio.TimeoutError:
             self._cancel_waiter(future)
             raise QueueTimeout() from None

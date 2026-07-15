@@ -119,9 +119,10 @@ class ProviderGate:
 
         disc_task = asyncio.ensure_future(disconnect.wait())
         futs = [f for _, f in entries] + [disc_task]
+        wait_timeout = self.timeout if self.timeout > 0 else None
         try:
             await asyncio.wait(
-                futs, timeout=self.timeout,
+                futs, timeout=wait_timeout,
                 return_when=asyncio.FIRST_COMPLETED,
             )
         except asyncio.CancelledError:

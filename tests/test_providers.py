@@ -191,6 +191,50 @@ async def test_race_timeout_raises_queue_timeout():
 
 
 @pytest.mark.asyncio
+async def test_race_timeout_disabled_waits_for_slot():
+    """timeout=0 disables the provider queue timeout: a waiter stays queued
+    until a slot frees rather than timing out."""
+    gate = _make_mgr_gate(max_inflight=1, timeout=0)
+    disc = asyncio.Event()
+    gate.try_provider("p1")
+
+    acquired = asyncio.Event()
+
+    async def waiter():
+        name = await gate.wait_provider(["p1"], disc)
+        assert name == "p1"
+        acquired.set()
+        gate.release_provider(name)
+
+    task = asyncio.create_task(waiter())
+    await asyncio.sleep(0.05)
+    assert not acquired.is_set()
+    gate.release_provider("p1")
+    await asyncio.wait_for(task, 2.0)
+    assert acquired.is_set()
+
+
+@pytest.mark.asyncio
+async def test_race_timeout_disabled_disconnect_returns_none():
+    """With the provider queue timeout disabled, a client disconnect still
+    cancels the wait and returns None."""
+    gate = _make_mgr_gate(max_inflight=1, timeout=0)
+    disc = asyncio.Event()
+    gate.try_provider("p1")
+
+    async def _wait():
+        return await gate.wait_provider(["p1"], disc)
+
+    task = asyncio.create_task(_wait())
+    await asyncio.sleep(0.05)
+    disc.set()
+    result = await asyncio.wait_for(task, 2.0)
+    assert result is None
+    assert gate.provider_inflight()["p1"] == 1
+    gate.release_provider("p1")
+
+
+@pytest.mark.asyncio
 async def test_race_all_queues_full_raises_overflow():
     gate = _make_mgr_gate(max_inflight=1, max_waiting=1, timeout=10.0)
     disc = asyncio.Event()

@@ -13,69 +13,55 @@ DEFAULT_DB_NAME = "data.db"
 
 _DEFAULT_CONFIG_TOML = """\
 # proxen configuration file.
-# Generated on first run, edit this file to configure proxen.
 # Path: ~/.config/proxen/config.toml
 
 host = "127.0.0.1"
 port = 1212
 
-# Database file location. Relative paths resolve to this config directory.
+# Relative paths resolve to this config directory.
 db_path = "data.db"
 
-# Concurrency limits. max_inflight caps total active requests; max_waiting
-# caps queued requests (both global and per-provider); queue_timeout is the
-# max wait in seconds. Per-key limits can be set in the dashboard Manage tab.
-# Set each provider's max_inflight in the dashboard or [[upstreams]].
+# max_inflight: active request cap. max_waiting: queued request cap (global and per-provider).
+# queue_timeout: max queue wait in seconds; 0 disables it.
 max_inflight = 5
 max_waiting = 50
 queue_timeout = 120
 
-# Keys your clients present to proxen. Leave empty to disable auth (dev only).
-# Generate one with: openssl rand -hex 24
+# Client auth keys. Empty disables auth (dev only).
+# Generate: openssl rand -hex 24
 api_keys = []
 
-# Admin keys for the management API + dashboard Manage tab.
+# Admin keys for the management API + dashboard.
 admin_api_keys = []
 
-# How often (seconds) to refresh the upstream model catalog.
+# Seconds between upstream model catalog refreshes.
 model_sync_interval = 3600
 
-# Hard cap on inbound request body size in bytes (default 10 MB).
+# Max inbound request body size in bytes (10 MB).
 max_body_bytes = 10485760
 
-# Upstream idle/read timeout: kill a connection only after this many seconds
-# with ZERO bytes received. A streaming response (including reasoning tokens)
-# resets this continuously and is never cut off. Only genuinely stalled
-# connections time out. There is no total cap, so a long-running stream stays
-# alive as long as data keeps flowing.
+# Kill a connection after this many seconds with zero bytes received.
+# Streaming responses reset it continuously; only stalled connections time out.
 upstream_sock_read = 90
 
-# Time-to-first-token timeout for streaming requests (seconds). If the
-# upstream accepts the connection (200 OK) but sends no data within this
-# window, the route is abandoned and the next fallback route is tried. This
-# prevents a slow-but-alive upstream from monopolising traffic while faster
-# fallbacks are available. Set to 0 to disable.
+# Streaming TTFT timeout (seconds). If no data arrives in this window,
+# the next fallback route is tried. 0 disables.
 upstream_ttft_timeout = 60
 
-# Trusted reverse proxy IPs for X-Forwarded-For / X-Forwarded-Proto handling.
-# Set to the IP(s) of your reverse proxy (nginx, Caddy, etc.).
-# Use "*" to trust all (not recommended for internet-facing deployments).
-# Leave at "127.0.0.1" if running without a reverse proxy.
+# Trusted reverse proxy IPs for X-Forwarded-For handling.
+# Use "*" to trust all. "127.0.0.1" if no reverse proxy.
 trusted_hosts = "127.0.0.1"
 
-# Admin API rate limit: max requests per IP per window.
+# Admin API rate limit: requests per IP per window.
 admin_rate_limit = 100
 admin_rate_limit_window = 60
 
-# Health guard: weighted failures before a route is marked "failing" and skipped
-# (fallback routes are tried instead).  Connection errors and TTFT timeouts count
-# as weight 2; 5xx as weight 1.  After tripping, probes use exponential backoff
-# (retry_delay x2 each time). Set failures to 0 to disable.
+# Mark a route failing after this many weighted failures, then try fallbacks.
+# Connection/TTFT errors weigh 2; 5xx weigh 1. 0 disables.
 health_guard_failures = 5
 health_guard_retry_delay = 5
 
-# Upstream providers (OpenAI-compatible).
-# Uncomment and edit to configure:
+# Upstream providers (OpenAI-compatible). Uncomment to configure:
 #
 # [[upstreams]]
 # name = "openai"

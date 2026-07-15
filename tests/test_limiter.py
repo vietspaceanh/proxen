@@ -50,6 +50,30 @@ async def test_queue_timeout():
 
 
 @pytest.mark.asyncio
+async def test_queue_timeout_disabled():
+    """timeout=0 disables the queue timeout: a waiter stays queued and is
+    promoted only when a slot frees, rather than timing out."""
+    gate = ConcurrencyGate(max_inflight=1, max_waiting=2, timeout=0)
+    held = await gate.acquire()
+    acquired = asyncio.Event()
+
+    async def waiter():
+        slot = await gate.acquire("k1")
+        acquired.set()
+        gate.release(slot)
+
+    task = asyncio.create_task(waiter())
+    await asyncio.sleep(0.05)
+    # Still queued - has not timed out, has not been promoted.
+    assert not acquired.is_set()
+    assert gate.snapshot().waiting == 1
+    # Releasing the held slot promotes the waiter.
+    gate.release(held)
+    await asyncio.wait_for(task, 2.0)
+    assert acquired.is_set()
+
+
+@pytest.mark.asyncio
 async def test_release_wakes_waiter():
     gate = ConcurrencyGate(max_inflight=1, max_waiting=2, timeout=5.0)
     held = await gate.acquire()

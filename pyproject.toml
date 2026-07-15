@@ -1,6 +1,6 @@
 [project]
 name = "proxen"
-version = "0.9.3"
+version = "0.9.4"
 description = "Lightweight async LLM API proxy with concurrency control, telemetry, and a live dashboard."
 requires-python = ">=3.12"
 dependencies = [
