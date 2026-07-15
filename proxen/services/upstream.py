@@ -104,6 +104,17 @@ class UpstreamManager:
             log.info("upstream POST connection failed, retrying on fresh connection")
             await asyncio.sleep(0.05)
             return await self.session.post(url, **kwargs)
+        except asyncio.TimeoutError:
+            # `sock_read` timeout: the upstream received the request but
+            # sent no data within the read window. aiohttp closes the
+            # connection, but the TCP close may not have reached the
+            # upstream yet. Brief pause so the upstream detects the close
+            # before the caller releases the provider slot and sends a
+            # new request - otherwise the upstream briefly sees an extra
+            # concurrent connection.
+            log.info("upstream POST timed out (sock_read), pausing before release")
+            await asyncio.sleep(0.5)
+            raise
 
     def all_enabled(self) -> list[Upstream]:
         return self.management.enabled_upstreams()
@@ -132,6 +143,12 @@ class UpstreamManager:
             if not targets:
                 raise KeyError(upstream_name)
         for upstream in targets:
+            if not self.gate.try_provider(upstream.name):
+                log.info(
+                    "skipping model sync for %s: provider at capacity",
+                    upstream.name,
+                )
+                continue
             try:
                 url = f"{upstream.base_url.rstrip('/')}/models"
                 headers = {
@@ -150,6 +167,8 @@ class UpstreamManager:
                 log.info("synced %d models from %s", len(models), upstream.name)
             except Exception:
                 log.exception("model sync failed for %s", upstream.name)
+            finally:
+                self.gate.release_provider(upstream.name)
         return self.get_models()
 
     async def start_sync_loop(self) -> None:
