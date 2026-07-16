@@ -23,7 +23,7 @@ from .context import (
     RequestContext,
     UpstreamUnavailable,
 )
-from .routing import Router
+from .routing import RouteResult, Router
 from .forwarding import StreamForwarder, cancel_and_await, safe_aclose, speed_metrics
 from ..upstream import UpstreamManager
 from ..management import Management
@@ -140,6 +140,49 @@ class Proxy:
             stream=stream, disconnected=True, completed=False,
         )
 
+    # ── Forward helpers ──────────────────────────────────────────────
+
+    async def _route(
+        self,
+        ctx: RequestContext,
+        disconnect: asyncio.Event,
+        *,
+        wall_start: float,
+        wall_perf: float,
+        stream: bool,
+        read_timeout: float,
+        ttft_timeout: float = 0.0,
+    ) -> RouteResult | None:
+        """Prepare request and try routes. Handles error telemetry."""
+        try:
+            body_or_payload = self._router.prepare_request(ctx)
+            if ctx.slot:
+                ctx.slot.model = ctx.model
+            return await self._router.try_routes(
+                ctx, body_or_payload, disconnect,
+                read_timeout=read_timeout,
+                ttft_timeout=ttft_timeout,
+            )
+        except ProxyError as exc:
+            self._error_telemetry(
+                wall_start, wall_perf, ctx.model, ctx.key_hash,
+                exc.upstream, exc.status, stream=stream,
+            )
+            raise
+
+    async def _close_upstream(
+        self,
+        resp: httpcore.Response,
+        ctx: RequestContext,
+        upstream_name: str,
+        *,
+        cooldown: bool = False,
+    ) -> None:
+        """Close the response and release the provider slot."""
+        await safe_aclose(resp)
+        self.upstream_mgr.gate.release_provider(upstream_name, cooldown=cooldown)
+        ctx.provider = ""
+
     # ── Forward: streaming ────────────────────────────────────────────
 
     async def forward_stream(
@@ -152,40 +195,21 @@ class Proxy:
         wall_start = time.time()
         wall_perf = time.perf_counter()
 
-        try:
-            body_or_payload = self._router.prepare_request(ctx)
-            if ctx.slot:
-                ctx.slot.model = ctx.model
-
-            ttft_timeout = self.settings.upstream_ttft_timeout or 0.0
-            result = await self._router.try_routes(
-                ctx, body_or_payload, disconnect,
-                read_timeout=self.settings.upstream_sock_read,
-                ttft_timeout=ttft_timeout,
-            )
-        except ProxyError as exc:
-            self._error_telemetry(
-                wall_start, wall_perf, ctx.model, ctx.key_hash,
-                exc.upstream, exc.status, stream=True,
-            )
-            raise
-        if result is None:
+        route = await self._route(
+            ctx, disconnect,
+            wall_start=wall_start, wall_perf=wall_perf, stream=True,
+            read_timeout=self.settings.upstream_sock_read,
+            ttft_timeout=self.settings.upstream_ttft_timeout or 0.0,
+        )
+        if route is None:
             return None
 
-        resp, upstream_name, upstream_model_id, start, first_chunk, stream_iter = result
-
-        fwd = StreamForwarder(
-            proxy=self, resp=resp, ctx=ctx,
-            wall_start=wall_start, start=start,
-            first_chunk=first_chunk,
-            disconnect=disconnect, watcher=watcher,
-            upstream_name=upstream_name,
-            upstream_model_id=upstream_model_id,
-            stream_iter=stream_iter,
+        fwd = StreamForwarder.from_route(
+            self, ctx, route, wall_start, disconnect, watcher,
             stall_timeout=self.settings.upstream_sock_read,
         )
         fwd.start_watch()
-        return resp.status, filter_headers(resp.headers), fwd.stream
+        return route.resp.status, filter_headers(route.resp.headers), fwd.stream
 
     # ── Forward: non-streaming ────────────────────────────────────────
 
@@ -199,26 +223,19 @@ class Proxy:
         wall_perf = time.perf_counter()
         slot = ctx.slot
 
-        try:
-            body_or_payload = self._router.prepare_request(ctx)
-            if slot:
-                slot.model = ctx.model
-
-            result = await self._router.try_routes(
-                ctx, body_or_payload, disconnect,
-                read_timeout=self.settings.upstream_non_streaming_timeout,
-            )
-        except ProxyError as exc:
-            self._error_telemetry(
-                wall_start, wall_perf, ctx.model, ctx.key_hash,
-                exc.upstream, exc.status, stream=False,
-            )
-            raise
-        if result is None:
+        route = await self._route(
+            ctx, disconnect,
+            wall_start=wall_start, wall_perf=wall_perf, stream=False,
+            read_timeout=self.settings.upstream_non_streaming_timeout,
+        )
+        if route is None:
             return None
 
-        resp, upstream_name, _upstream_model_id, start, _, _ = result
+        resp = route.resp
+        upstream_name = route.upstream_name
+        start = route.start
 
+        # Read body, racing against client disconnect and read deadline.
         read_task = asyncio.ensure_future(resp.aread())
         disc_task = asyncio.ensure_future(disconnect.wait())
         await asyncio.wait(
@@ -229,11 +246,8 @@ class Proxy:
         await cancel_and_await(disc_task)
 
         if disconnect.is_set() or not read_task.done():
-            # Client disconnect or per-stream stall.
             await cancel_and_await(read_task)
-            await safe_aclose(resp)
-            self.upstream_mgr.gate.release_provider(upstream_name, cooldown=True)
-            ctx.provider = ""
+            await self._close_upstream(resp, ctx, upstream_name, cooldown=True)
             if disconnect.is_set():
                 self._cancel_telemetry(
                     wall_start, start, ctx.model, ctx.key_hash,
@@ -253,13 +267,11 @@ class Proxy:
         try:
             content = read_task.result()
         except (httpcore.NetworkError, httpcore.ProtocolError, httpcore.TimeoutException) as exc:
-            await safe_aclose(resp)
-            self.upstream_mgr.gate.release_provider(upstream_name, cooldown=True)
+            await self._close_upstream(resp, ctx, upstream_name, cooldown=True)
             self._error_telemetry(
                 wall_start, wall_perf, ctx.model, ctx.key_hash,
                 upstream_name, 502, stream=False,
             )
-            ctx.provider = ""
             raise UpstreamUnavailable(
                 f"upstream read failed: {exc}", upstream=upstream_name,
             ) from exc
@@ -277,8 +289,5 @@ class Proxy:
             status=resp.status, duration=duration, stream=False,
         )
 
-        await safe_aclose(resp)
-        self.upstream_mgr.gate.release_provider(upstream_name)
-        ctx.provider = ""
-
+        await self._close_upstream(resp, ctx, upstream_name)
         return resp.status, filter_headers(resp.headers), content

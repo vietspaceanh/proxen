@@ -58,6 +58,29 @@ class StreamForwarder(msgspec.Struct):
     gen_started: bool = False
     watch_task: asyncio.Task | None = None
 
+    @classmethod
+    def from_route(
+        cls,
+        proxy: object,
+        ctx: RequestContext,
+        route: object,
+        wall_start: float,
+        disconnect: asyncio.Event,
+        watcher: asyncio.Task,
+        stall_timeout: float,
+    ) -> StreamForwarder:
+        """Build a `StreamForwarder` from a `RouteResult`."""
+        return cls(
+            proxy=proxy, resp=route.resp, ctx=ctx,
+            wall_start=wall_start, start=route.start,
+            first_chunk=route.first_chunk,
+            disconnect=disconnect, watcher=watcher,
+            upstream_name=route.upstream_name,
+            upstream_model_id=route.upstream_model_id,
+            stream_iter=route.stream_iter,
+            stall_timeout=stall_timeout,
+        )
+
     def start_watch(self) -> None:
         """Start the background disconnect-watcher task."""
         self.watch_task = asyncio.ensure_future(self.watch())

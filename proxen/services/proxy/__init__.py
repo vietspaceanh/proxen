@@ -18,11 +18,12 @@ from .context import (
 )
 from .forwarding import StreamForwarder, speed_metrics
 from .pipeline import Proxy
-from .routing import Router
+from .routing import Router, RouteResult
 
 __all__ = [
     "Proxy",
     "Router",
+    "RouteResult",
     "StreamForwarder",
     "RequestContext",
     "ProxyError",
