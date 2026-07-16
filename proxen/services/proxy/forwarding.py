@@ -21,6 +21,22 @@ from .context import RequestContext
 
 log = logging.getLogger("proxen.streaming")
 
+_CLOSE_TIMEOUT = 5.0
+
+
+async def safe_aclose(resp: httpcore.Response, *, timeout: float = _CLOSE_TIMEOUT) -> None:
+    """Best-effort `aclose()` with timeout and CancelledError suppression."""
+    with suppress(asyncio.CancelledError, Exception):
+        await asyncio.wait_for(resp.aclose(), timeout=timeout)
+
+
+async def cancel_and_await(task: asyncio.Task) -> None:
+    """Cancel *task* and swallow the resulting exception (if any)."""
+    if not task.done():
+        task.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await task
+
 
 class StreamForwarder(msgspec.Struct):
     """Manages a streaming response: yields chunks, tracks disconnect,
@@ -36,6 +52,7 @@ class StreamForwarder(msgspec.Struct):
     watcher: asyncio.Task
     upstream_name: str
     upstream_model_id: str
+    stall_timeout: float
     stream_iter: object = None
     released: bool = False
     gen_started: bool = False
@@ -46,25 +63,49 @@ class StreamForwarder(msgspec.Struct):
         self.watch_task = asyncio.ensure_future(self.watch())
 
     async def release(self) -> None:
-        """Idempotent: close resp + release provider + global gate + watcher."""
+        """Idempotent: release slot + close resp + cancel watcher.
+
+        Slot is released before `aclose()` so cancellation during close
+        cannot orphan it.
+        """
         if self.released:
             return
         self.released = True
-        with suppress(Exception):
-            await self.resp.aclose()
         self.proxy.release(self.ctx, cooldown=self.disconnect.is_set())
+        await safe_aclose(self.resp)
         if not self.watcher.done():
             self.watcher.cancel()
 
     async def watch(self) -> None:
-        """Await disconnect then release. Safety timeout if generator never starts."""
-        try:
-            await asyncio.wait_for(self.disconnect.wait(), timeout=60.0)
-        except asyncio.TimeoutError:
-            if self.gen_started:
-                await self.disconnect.wait()
+        """Release on disconnect or stall while the generator is suspended."""
+        while not self.disconnect.is_set():
+            slot = self.ctx.slot
+            now = time.monotonic()
+            if slot is not None and slot.last_byte_time:
+                # Wake at the stall deadline (last byte + stall_timeout).
+                timeout = max(0.1, slot.last_byte_time + self.stall_timeout - now)
             else:
-                log.warning("stream generator never started - releasing resources")
+                # No byte yet: poll briefly to pick up gen-start / first byte.
+                timeout = min(self.stall_timeout, 1.0)
+            try:
+                await asyncio.wait_for(self.disconnect.wait(), timeout=timeout)
+                break  # client disconnected
+            except asyncio.TimeoutError:
+                pass
+            if not self.gen_started:
+                # gen-never-started safety.
+                if time.monotonic() - self.start >= 60.0:
+                    log.warning("stream generator never started - releasing resources")
+                    break
+                continue
+            slot = self.ctx.slot
+            if slot is not None and slot.last_byte_time and \
+                    time.monotonic() - slot.last_byte_time >= self.stall_timeout:
+                log.warning(
+                    "upstream %s stream stalled - no data for %.0fs",
+                    self.upstream_name, self.stall_timeout,
+                )
+                break
         await self.release()
 
     async def stream(self):
@@ -75,6 +116,7 @@ class StreamForwarder(msgspec.Struct):
         completed = False
         upstream_error = False
         ttft: float | None = None
+        _disc_wait: asyncio.Task | None = None
         try:
             if self.first_chunk:
                 if ttft is None:
@@ -95,13 +137,19 @@ class StreamForwarder(msgspec.Struct):
                 read_task = asyncio.ensure_future(anext(_stream, None))
                 done, _pending = await asyncio.wait(
                     {read_task, _disc_wait},
+                    timeout=self.stall_timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if read_task not in done:
-                    if not read_task.done():
-                        read_task.cancel()
-                        with suppress(asyncio.CancelledError, Exception):
-                            await read_task
+                stalled = not done
+                if stalled or read_task not in done:
+                    # No chunk or client disconnect.
+                    await cancel_and_await(read_task)
+                    if stalled:
+                        log.warning(
+                            "upstream %s stream stalled - no data for %.0fs",
+                            self.upstream_name, self.stall_timeout,
+                        )
+                        upstream_error = True
                     break
                 chunk = read_task.result()
                 if chunk is None:
@@ -116,19 +164,15 @@ class StreamForwarder(msgspec.Struct):
                     slot.last_byte_time = time.monotonic()
                     slot.reset_idle()
                 yield chunk
-            if not _disc_wait.done():
-                _disc_wait.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await _disc_wait
         except Exception:
             if not self.disconnect.is_set():
                 upstream_error = True
                 raise
         finally:
             if self.watch_task is not None:
-                self.watch_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await self.watch_task
+                await cancel_and_await(self.watch_task)
+            if _disc_wait is not None:
+                await cancel_and_await(_disc_wait)
             disconnected = self.disconnect.is_set()
             usage, found_usage = parser.finalize()
             completed_final = completed or found_usage
@@ -141,22 +185,24 @@ class StreamForwarder(msgspec.Struct):
             ttft_val, tps = speed_metrics(
                 self.resp.status, ttft, duration, usage.output_tokens,
             )
-            if upstream_error and self.upstream_name:
-                self.proxy.upstream_mgr.health.record_failure(
-                    (self.upstream_name, self.upstream_model_id), weight=1,
+            try:
+                if upstream_error and self.upstream_name:
+                    self.proxy.upstream_mgr.health.record_failure(
+                        (self.upstream_name, self.upstream_model_id), weight=1,
+                    )
+                self.proxy._record(
+                    wall_start=self.wall_start, model=self.ctx.model,
+                    upstream=self.upstream_name, key_id=self.ctx.key_hash,
+                    ttft=ttft_val, tps=tps, usage=usage,
+                    status=self.resp.status, duration=duration,
+                    stream=True, disconnected=disconnected,
+                    completed=completed_final,
                 )
-            self.proxy._record(
-                wall_start=self.wall_start, model=self.ctx.model,
-                upstream=self.upstream_name, key_id=self.ctx.key_hash,
-                ttft=ttft_val, tps=tps, usage=usage,
-                status=self.resp.status, duration=duration,
-                stream=True, disconnected=disconnected,
-                completed=completed_final,
-            )
+            except Exception:
+                # Telemetry must never block slot release.
+                log.exception("telemetry recording failed")
             await self.release()
-            if not self.watcher.done():
-                with suppress(asyncio.CancelledError, Exception):
-                    await self.watcher
+            await cancel_and_await(self.watcher)
             log.info(
                 "stream ended completed=%s disconnected=%s model=%s duration=%.3f",
                 completed_final, disconnected, self.ctx.model, duration,

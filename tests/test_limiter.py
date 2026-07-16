@@ -448,3 +448,25 @@ async def test_cancel_waiter_with_already_resolved_future():
     slot = await asyncio.wait_for(acq_task, 1.0)
     gate.release(slot)
     assert gate._global.active == 0
+
+
+@pytest.mark.asyncio
+async def test_no_signal_not_set_during_ttft_wait():
+    """`_idle_notified` ("no signal") must not fire before the first byte."""
+    gate = ConcurrencyGate(max_inflight=5, max_waiting=5, timeout=10.0)
+    slot = await gate.acquire("k1")
+    gate._global._on_idle_timeout(slot)
+
+    assert slot._idle_notified is False
+
+
+@pytest.mark.asyncio
+async def test_no_signal_set_after_byte_then_idle():
+    """`_idle_notified` ("no signal") fires when bytes were flowing but
+    then stopped for longer than the idle threshold."""
+    gate = ConcurrencyGate(max_inflight=5, max_waiting=5, timeout=10.0)
+    slot = await gate.acquire("k1")
+    slot.last_byte_time = time.monotonic() - 40.0
+    gate._global._on_idle_timeout(slot)
+
+    assert slot._idle_notified is True

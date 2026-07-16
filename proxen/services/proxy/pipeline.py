@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import suppress
 from typing import Any
 
 import httpcore
@@ -25,7 +24,7 @@ from .context import (
     UpstreamUnavailable,
 )
 from .routing import Router
-from .forwarding import StreamForwarder, speed_metrics
+from .forwarding import StreamForwarder, cancel_and_await, safe_aclose, speed_metrics
 from ..upstream import UpstreamManager
 from ..management import Management
 from ..telemetry import TelemetryWriter
@@ -183,6 +182,7 @@ class Proxy:
             upstream_name=upstream_name,
             upstream_model_id=upstream_model_id,
             stream_iter=stream_iter,
+            stall_timeout=self.settings.upstream_sock_read,
         )
         fwd.start_watch()
         return resp.status, filter_headers(resp.headers), fwd.stream
@@ -219,40 +219,41 @@ class Proxy:
 
         resp, upstream_name, _upstream_model_id, start, _, _ = result
 
-        # Read the response body, racing against client disconnect.
-        # httpcore's read timeout (from request extensions) handles
-        # upstream stalls.  On timeout, RST_STREAM is sent automatically.
         read_task = asyncio.ensure_future(resp.aread())
         disc_task = asyncio.ensure_future(disconnect.wait())
         await asyncio.wait(
             {read_task, disc_task},
+            timeout=self.settings.upstream_non_streaming_timeout,
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if not disc_task.done():
-            disc_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await disc_task
+        await cancel_and_await(disc_task)
 
-        if disconnect.is_set():
-            if not read_task.done():
-                read_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await read_task
-            with suppress(Exception):
-                await resp.aclose()
+        if disconnect.is_set() or not read_task.done():
+            # Client disconnect or per-stream stall.
+            await cancel_and_await(read_task)
+            await safe_aclose(resp)
             self.upstream_mgr.gate.release_provider(upstream_name, cooldown=True)
-            self._cancel_telemetry(
-                wall_start, start, ctx.model, ctx.key_hash,
-                upstream_name, resp.status, stream=False,
-            )
             ctx.provider = ""
-            return None
+            if disconnect.is_set():
+                self._cancel_telemetry(
+                    wall_start, start, ctx.model, ctx.key_hash,
+                    upstream_name, resp.status, stream=False,
+                )
+                return None
+            self._error_telemetry(
+                wall_start, wall_perf, ctx.model, ctx.key_hash,
+                upstream_name, 502, stream=False,
+            )
+            raise UpstreamUnavailable(
+                f"upstream read timed out after "
+                f"{self.settings.upstream_non_streaming_timeout}s",
+                upstream=upstream_name,
+            )
 
         try:
             content = read_task.result()
         except (httpcore.NetworkError, httpcore.ProtocolError, httpcore.TimeoutException) as exc:
-            with suppress(Exception):
-                await resp.aclose()
+            await safe_aclose(resp)
             self.upstream_mgr.gate.release_provider(upstream_name, cooldown=True)
             self._error_telemetry(
                 wall_start, wall_perf, ctx.model, ctx.key_hash,
@@ -276,8 +277,7 @@ class Proxy:
             status=resp.status, duration=duration, stream=False,
         )
 
-        with suppress(Exception):
-            await resp.aclose()
+        await safe_aclose(resp)
         self.upstream_mgr.gate.release_provider(upstream_name)
         ctx.provider = ""
 

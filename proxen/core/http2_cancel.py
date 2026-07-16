@@ -22,24 +22,23 @@ import h2.errors
 
 log = logging.getLogger("proxen.http2")
 
+# Cap RST_STREAM write so a stalled upstream cannot hang cleanup.
+_RST_WRITE_TIMEOUT = 5.0
+
 from httpcore._async.http2 import AsyncHTTP2Connection
 
 _original_response_closed = AsyncHTTP2Connection._response_closed
 
 
 async def _rst_stream_response_closed(self, stream_id: int) -> None:
-    """Send RST_STREAM(CANCEL) before the original cleanup.
-
-    Best-effort: if the stream is already closed, h2 raises
-    ProtocolError which we catch and ignore.
-    """
+    """Send RST_STREAM(CANCEL) before the original cleanup."""
     try:
         self._h2_state.reset_stream(
             stream_id, error_code=h2.errors.ErrorCodes.CANCEL,
         )
         data = self._h2_state.data_to_send()
         if data:
-            await self._network_stream.write(data, timeout=None)
+            await self._network_stream.write(data, timeout=_RST_WRITE_TIMEOUT)
     except Exception:
         pass
     await _original_response_closed(self, stream_id)

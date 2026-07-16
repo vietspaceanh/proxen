@@ -242,6 +242,15 @@ class Settings:
         d.update(overrides)
         return _build_settings(d)
 
+    def validate(self) -> None:
+        """Validate timeout settings at config load time."""
+        if self.upstream_sock_read <= 0:
+            raise ValueError("upstream_sock_read must be > 0")
+        if self.upstream_non_streaming_timeout <= 0:
+            raise ValueError("upstream_non_streaming_timeout must be > 0")
+        if self.upstream_ttft_timeout < 0:
+            raise ValueError("upstream_ttft_timeout must be >= 0 (0 disables)")
+
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
@@ -287,7 +296,7 @@ def _build_settings(data: dict[str, Any]) -> Settings:
     pricing_data = data.pop("pricing", {})
     pricing = {k: Pricing(**v) for k, v in pricing_data.items()}
 
-    return Settings(
+    settings = Settings(
         host=str(data.get("host", "127.0.0.1")),
         port=int(data.get("port", 1212)),
         api_keys=list(data.get("api_keys", [])),
@@ -309,6 +318,8 @@ def _build_settings(data: dict[str, Any]) -> Settings:
         health_guard_retry_delay=float(data.get("health_guard_retry_delay", 5.0)),
         pricing=pricing,
     )
+    settings.validate()
+    return settings
 
 
 def load_settings(config_path: Path | None = None) -> Settings:
