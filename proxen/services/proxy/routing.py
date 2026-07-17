@@ -162,7 +162,12 @@ class Router:
         # defeated by HTTP/2 multiplexing (other streams' traffic resets
         # the shared socket timer), so a per-stream deadline is enforced
         # here - the same pattern used in `_ttft_wait` and the streaming
-        # loop.
+        # loop.  When `ttft_timeout` is set and shorter than the socket
+        # read timeout, bound the header phase by it so the TTFT window
+        # genuinely covers "time to first data" (headers or chunk).
+        header_deadline = (
+            min(read_timeout, ttft_timeout) if ttft_timeout else read_timeout
+        )
         post_task = asyncio.ensure_future(
             self.upstream_mgr.request(
                 "POST", url, headers=headers,
@@ -173,7 +178,7 @@ class Router:
         try:
             await asyncio.wait(
                 {post_task, disc_task},
-                timeout=read_timeout,
+                timeout=header_deadline,
                 return_when=asyncio.FIRST_COMPLETED,
             )
         except BaseException:
@@ -198,7 +203,7 @@ class Router:
                 (upstream.name, route.upstream_model_id), weight=2,
             )
             log.warning(
-                "upstream %s header timeout (%.1fs)", upstream.name, read_timeout,
+                "upstream %s header timeout (%.1fs)", upstream.name, header_deadline,
             )
             self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
             return RouteResult(upstream_name=upstream.name)
@@ -207,7 +212,7 @@ class Router:
             resp = post_task.result()
         except httpcore.ReadTimeout:
             log.warning(
-                "upstream %s header timeout (%.1fs)", upstream.name, read_timeout,
+                "upstream %s header timeout (%.1fs)", upstream.name, header_deadline,
             )
             self.upstream_mgr.health.record_failure(
                 (upstream.name, route.upstream_model_id), weight=2,

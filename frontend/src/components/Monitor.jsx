@@ -6,7 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { ChartCanvas } from "./ChartCanvas.jsx";
 import { fmt, fmtTime, fmtHour, fmtTTFT, fmtTPS, statusColor, statusMessage, resolveUser, fmtCompact } from "../lib/format.js";
 import { THEMES } from "../lib/theme.js";
-import { chartOpts, barLabels } from "../lib/chart-setup.js";
+import { chartOpts } from "../lib/chart-setup.js";
 
 // ─── small cell components ───────────────────────────────────────────
 
@@ -152,19 +152,41 @@ function buildDailyTokensChart(stats, theme) {
   const dt = stats.daily_tokens || [];
   const accent = v["--accent"];
   const accent2 = v["--accent-2"];
-  const success = v["--success"];
   const grid = v["--chart-grid"];
   const text = v["--text-muted"];
+  const inputs = dt.map((r) => r.input_tokens || 0);
+  const outputs = dt.map((r) => r.output_tokens || 0);
+  const cached = dt.map((r) => r.cached_input_tokens || 0);
   return {
     data: {
       labels: dt.map((r) => r.day),
       datasets: [
-        { label: "Input", data: dt.map((r) => r.input_tokens), backgroundColor: accent, borderRadius: 3 },
-        { label: "Cached", data: dt.map((r) => r.cached_input_tokens), backgroundColor: accent2, borderRadius: 3 },
-        { label: "Output", data: dt.map((r) => r.output_tokens), backgroundColor: success, borderRadius: 3 },
+        { label: "Input + Output", data: inputs.map((x, i) => x + outputs[i]), _input: inputs, _output: outputs, backgroundColor: accent, borderRadius: 3 },
+        { label: "Cached", data: cached, backgroundColor: accent2, borderRadius: 3 },
       ],
     },
-    options: chartOpts({ scales: { x: { ticks: { color: text, maxTicksLimit: 12, font: { size: 11 } }, grid: { color: grid } }, y: { ticks: { color: text, font: { size: 11 } }, grid: { color: grid } } } }, theme),
+    options: chartOpts({
+      interaction: { mode: "nearest", intersect: true },
+      plugins: {
+        tooltip: {
+          displayColors: false,
+          callbacks: {
+            label: (ctx) => {
+              if (ctx.dataset.label === "Input + Output") {
+                return [`Input: ${fmt(ctx.dataset._input[ctx.dataIndex], 0)}`, `Output: ${fmt(ctx.dataset._output[ctx.dataIndex], 0)}`];
+              }
+              if (ctx.dataset.label === "Cached") {
+                const inp = inputs[ctx.dataIndex] || 0;
+                const pct = inp > 0 ? Math.round((ctx.parsed.y / inp) * 100) : 0;
+                return `Cached: ${fmt(ctx.parsed.y, 0)} (${pct}%)`;
+              }
+              return `${ctx.dataset.label}: ${fmt(ctx.parsed.y, 0)}`;
+            },
+          },
+        },
+      },
+      scales: { x: { ticks: { color: text, maxTicksLimit: 12, font: { size: 11 } }, grid: { color: grid } }, y: { ticks: { color: text, font: { size: 11 } }, grid: { color: grid } } },
+    }, theme),
   };
 }
 
@@ -174,11 +196,13 @@ function buildDailyRequestsChart(stats, theme) {
   const warning = v["--warning"];
   const grid = v["--chart-grid"];
   const text = v["--text-muted"];
+  const reqs = dr.map((r) => r.requests);
   return {
-    plugins: [barLabels],
     data: {
       labels: dr.map((r) => r.day),
-      datasets: [{ label: "Requests", data: dr.map((r) => r.requests), backgroundColor: warning, borderRadius: 3 }],
+      datasets: [
+        { label: "Requests", data: reqs, backgroundColor: warning, borderRadius: 3 },
+      ],
     },
     options: chartOpts({ scales: { x: { ticks: { color: text, maxTicksLimit: 12, font: { size: 11 } }, grid: { color: grid } }, y: { ticks: { color: text, font: { size: 11 } }, grid: { color: grid } } } }, theme),
   };

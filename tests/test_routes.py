@@ -849,3 +849,46 @@ def test_ttft_timeout_only_route_returns_502(ttft_client, mock_upstream):
         headers=KEY,
     )
     assert r.status_code == 502
+
+
+def test_ttft_timeout_bounds_header_phase(ttft_client, mock_upstream):
+    """A streaming upstream that stalls before sending response headers must
+    be abandoned within the TTFT timeout (not the longer socket read
+    timeout) and fall back to the next route."""
+    ttft_client.post(
+        "/api/management/upstreams",
+        json={
+            "name": "stall-headers",
+            "base_url": mock_upstream + "/v1",
+            "api_key": "stall-headers-key",
+            "enabled": True,
+        },
+        headers=ADM,
+    )
+    ttft_client.put(
+        "/api/management/models/gpt-test",
+        json={
+            "routes": [
+                {"upstream_name": "stall-headers", "upstream_model_id": "gpt-test", "sort_order": 0},
+                {"upstream_name": "mock", "upstream_model_id": "gpt-test", "sort_order": 1},
+            ],
+        },
+        headers=ADM,
+    )
+    t0 = time.monotonic()
+    with ttft_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+        headers=KEY,
+    ) as r:
+        assert r.status_code == 200
+        body = b"".join(r.iter_raw())
+    elapsed = time.monotonic() - t0
+    assert b"Hello" in body
+    # TTFT (0.5s) bounds the header phase, not upstream_sock_read (90s).
+    assert elapsed < 30

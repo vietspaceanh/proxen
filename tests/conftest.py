@@ -55,6 +55,17 @@ async def mock_handler(request: web.Request) -> web.Response:
                 status=404,
             )
         if body.get("stream"):
+            if "stall-headers" in auth:
+                # Delay before sending response headers (exercises the
+                # header-phase TTFT bound).
+                await asyncio.sleep(2)
+                resp = web.StreamResponse(
+                    status=200, headers={"Content-Type": "text/event-stream"}
+                )
+                await resp.prepare(request)
+                await resp.write(b'data: {"choices":[{"delta":{"content":"late"}}]}\n\n')
+                await resp.write_eof()
+                return resp
             if "slow" in auth:
                 resp = web.StreamResponse(
                     status=200, headers={"Content-Type": "text/event-stream"}
