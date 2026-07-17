@@ -157,9 +157,12 @@ class Router:
         )
         url = self.upstream_url(upstream, ctx.path, ctx.query)
 
-        # Header phase: race POST against client disconnect.
-        # httpcore's built-in read timeout handles header timeout
-        # (raises ReadTimeout, which triggers RST_STREAM via monkey-patch).
+        # Header phase: race POST against client disconnect and a
+        # per-stream timeout.  httpcore's socket-level read timeout is
+        # defeated by HTTP/2 multiplexing (other streams' traffic resets
+        # the shared socket timer), so a per-stream deadline is enforced
+        # here - the same pattern used in `_ttft_wait` and the streaming
+        # loop.
         post_task = asyncio.ensure_future(
             self.upstream_mgr.request(
                 "POST", url, headers=headers,
@@ -167,10 +170,18 @@ class Router:
             )
         )
         disc_task = asyncio.ensure_future(disconnect.wait())
-        await asyncio.wait(
-            {post_task, disc_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        try:
+            await asyncio.wait(
+                {post_task, disc_task},
+                timeout=read_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except BaseException:
+            await cancel_and_await(post_task)
+            await cancel_and_await(disc_task)
+            self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
+            ctx.provider = ""
+            raise
         await cancel_and_await(disc_task)
 
         if disconnect.is_set():
@@ -180,6 +191,17 @@ class Router:
                 await safe_aclose(post_task.result())
             self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
             return RouteResult(disconnect=True, upstream_name=upstream.name)
+
+        if not post_task.done():
+            await cancel_and_await(post_task)
+            self.upstream_mgr.health.record_failure(
+                (upstream.name, route.upstream_model_id), weight=2,
+            )
+            log.warning(
+                "upstream %s header timeout (%.1fs)", upstream.name, read_timeout,
+            )
+            self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
+            return RouteResult(upstream_name=upstream.name)
 
         try:
             resp = post_task.result()
@@ -322,8 +344,6 @@ class Router:
         r = await self.attempt_route(ctx, route, upstream, body_or_payload, **kw)
         if r.ok:
             await self.release_held(held)
-            if slot is not None:
-                slot.mark_receiving()
             return "ok", r
         if r.disconnect:
             await self.release_held(held)
@@ -443,8 +463,6 @@ class Router:
 
         # Fall back to a held (retryable-status) response.
         if held is not None:
-            if slot is not None:
-                slot.mark_receiving()
             ctx.provider = held.upstream_name
             held.start = time.perf_counter()
             return held

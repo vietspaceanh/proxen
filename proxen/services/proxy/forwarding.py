@@ -145,6 +145,7 @@ class StreamForwarder(msgspec.Struct):
                 if ttft is None:
                     ttft = time.perf_counter() - self.start
                     if slot:
+                        slot.mark_receiving()
                         slot.record_ttft(ttft)
                 parser.feed(self.first_chunk)
                 if slot:
@@ -181,6 +182,7 @@ class StreamForwarder(msgspec.Struct):
                 if ttft is None:
                     ttft = time.perf_counter() - self.start
                     if slot:
+                        slot.mark_receiving()
                         slot.record_ttft(ttft)
                 parser.feed(chunk)
                 if slot:

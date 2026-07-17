@@ -645,13 +645,16 @@ async def test_provider_queue_shows_as_waiting_not_inflight():
     assert len(snap.inflight) == 1
     assert snap.active == 1
     assert snap.waiting == 0
-    assert slot.phase == "receiving"
+    # Route resolved but stream not yet consumed - phase is still
+    # "requesting" until the first byte is actually received.
+    assert slot.phase == "requesting"
 
     # Drain the stream so resources are released.
     _, _, stream_gen = result
     async for _ in stream_gen():
         pass
 
+    assert slot.phase == "receiving"
     assert gate.snapshot().active == 0
     if not watcher.done():
         watcher.cancel()
