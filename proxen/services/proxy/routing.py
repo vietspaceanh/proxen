@@ -176,7 +176,7 @@ class Router:
         )
         disc_task = asyncio.ensure_future(disconnect.wait())
         try:
-            await asyncio.wait(
+            done, pending = await asyncio.wait(
                 {post_task, disc_task},
                 timeout=header_deadline,
                 return_when=asyncio.FIRST_COMPLETED,
@@ -187,6 +187,23 @@ class Router:
             self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
             ctx.provider = ""
             raise
+
+        # If neither task completed, the header deadline elapsed - the
+        # upstream stalled before sending headers.  This is a health
+        # failure even when the client also disconnects during cleanup.
+        if post_task in pending and disc_task in pending:
+            await cancel_and_await(post_task)
+            await cancel_and_await(disc_task)
+            self.upstream_mgr.health.record_failure(
+                (upstream.name, route.upstream_model_id), weight=2,
+            )
+            log.warning(
+                "upstream %s header timeout (%.1fs)", upstream.name, header_deadline,
+            )
+            self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
+            return RouteResult(upstream_name=upstream.name)
+
+        # Either the POST completed or the client disconnected first.
         await cancel_and_await(disc_task)
 
         if disconnect.is_set():
@@ -196,17 +213,6 @@ class Router:
                 await safe_aclose(post_task.result())
             self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
             return RouteResult(disconnect=True, upstream_name=upstream.name)
-
-        if not post_task.done():
-            await cancel_and_await(post_task)
-            self.upstream_mgr.health.record_failure(
-                (upstream.name, route.upstream_model_id), weight=2,
-            )
-            log.warning(
-                "upstream %s header timeout (%.1fs)", upstream.name, header_deadline,
-            )
-            self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
-            return RouteResult(upstream_name=upstream.name)
 
         try:
             resp = post_task.result()
@@ -281,10 +287,30 @@ class Router:
         stream_iter = aiter(resp.stream)
         read_task = asyncio.ensure_future(anext(stream_iter))
         disc_task = asyncio.ensure_future(disconnect.wait())
-        await asyncio.wait(
+        done, pending = await asyncio.wait(
             {read_task, disc_task}, timeout=remaining,
             return_when=asyncio.FIRST_COMPLETED,
         )
+
+        # If neither task completed, the TTFT deadline elapsed - the
+        # upstream stalled.  This is a health failure even when the
+        # client also disconnects during cleanup (the stall is the
+        # triggering event, not the disconnect), so it is recorded as
+        # an upstream failure to poison the guard and allow fallback.
+        if read_task in pending and disc_task in pending:
+            await cancel_and_await(read_task)
+            await cancel_and_await(disc_task)
+            await safe_aclose(resp)
+            self.upstream_mgr.health.record_failure(
+                (upstream.name, route.upstream_model_id), weight=2,
+            )
+            log.warning(
+                "upstream %s TTFT timeout (%.1fs)", upstream.name, ttft_timeout,
+            )
+            self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
+            return RouteResult(upstream_name=upstream.name)
+
+        # Either the read completed or the client disconnected first.
         await cancel_and_await(disc_task)
 
         if disconnect.is_set():
@@ -297,18 +323,6 @@ class Router:
                     upstream.name, resp.status, stream=True,
                 )
             return RouteResult(disconnect=True, upstream_name=upstream.name)
-
-        if not read_task.done():
-            await cancel_and_await(read_task)
-            await safe_aclose(resp)
-            self.upstream_mgr.health.record_failure(
-                (upstream.name, route.upstream_model_id), weight=2,
-            )
-            log.warning(
-                "upstream %s TTFT timeout (%.1fs)", upstream.name, ttft_timeout,
-            )
-            self.upstream_mgr.gate.release_provider(upstream.name, cooldown=True)
-            return RouteResult(upstream_name=upstream.name)
 
         try:
             first_chunk = read_task.result()

@@ -498,7 +498,83 @@ async def test_simple_stall_releases_on_timeout():
     upstream_mgr.gate.release_provider.assert_called_with("mock", cooldown=True)
 
 
-# ─── In-flight TTFT surfacing ───────────────────────────────────────
+@pytest.mark.asyncio
+async def test_ttft_timeout_with_disconnect_records_502():
+    """When the TTFT deadline elapses while the upstream is stalled (no
+    first byte), the failure is recorded as 502 even if the client also
+    disconnects during cleanup.
+
+    The upstream stall is the triggering event, so it must poison the
+    health guard and surface as an upstream failure - not as a client
+    "cancelled" - to allow fallback to the next route.
+    """
+    resp = MagicMock(spec=httpcore.Response)
+    resp.status = 200
+    resp.headers = [(b"content-type", b"text/event-stream")]
+    resp.stream = _StalledStream()
+    resp.aread = AsyncMock(return_value=b"")
+    resp.aclose = AsyncMock()
+
+    proxy, upstream_mgr, sink, _ = _make_proxy(resp, ttft_timeout=0.1)
+
+    disconnect = asyncio.Event()
+    asyncio.create_task(_delayed_disconnect(disconnect, 0.15))
+    watcher = asyncio.create_task(
+        watch_disconnect(_BlockingReceive().receive, disconnect)
+    )
+
+    with pytest.raises(UpstreamUnavailable):
+        await _call_forward_stream(proxy, disconnect, watcher)
+
+    watcher.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await watcher
+
+    sink.enqueue.assert_called_once()
+    record = sink.enqueue.call_args.args[0]
+    assert record.status == 502
+    assert record.client_disconnect is False
+    upstream_mgr.health.record_failure.assert_called_once_with(
+        ("mock", "gpt-test"), weight=2,
+    )
+    upstream_mgr.gate.release_provider.assert_called_with("mock", cooldown=True)
+
+
+@pytest.mark.asyncio
+async def test_simple_stall_with_disconnect_records_502():
+    """A non-streaming read stall that elapses the read deadline is recorded
+    as 502 even if the client also disconnects during cleanup.
+
+    The upstream stall is the triggering event, so it must surface as an
+    upstream failure - not as a client "cancelled".
+    """
+
+    async def _blocking_aread():
+        await asyncio.Event().wait()
+        return b""  # pragma: no cover
+
+    resp = MagicMock(spec=httpcore.Response)
+    resp.status = 200
+    resp.headers = [(b"content-type", b"application/json")]
+    resp.aread = _blocking_aread
+    resp.aclose = AsyncMock()
+
+    proxy, upstream_mgr, sink, _ = _make_proxy(
+        resp, upstream_non_streaming_timeout=0.1,
+    )
+
+    disconnect = asyncio.Event()
+    asyncio.create_task(_delayed_disconnect(disconnect, 0.15))
+
+    with pytest.raises(UpstreamUnavailable) as exc_info:
+        await _call_forward_simple(proxy, disconnect)
+
+    assert exc_info.value.upstream == "mock"
+    sink.enqueue.assert_called_once()
+    record = sink.enqueue.call_args.args[0]
+    assert record.status == 502
+    assert record.client_disconnect is False
+    upstream_mgr.gate.release_provider.assert_called_with("mock", cooldown=True)
 
 
 @pytest.mark.asyncio

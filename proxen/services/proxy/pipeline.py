@@ -238,22 +238,20 @@ class Proxy:
         # Read body, racing against client disconnect and read deadline.
         read_task = asyncio.ensure_future(resp.aread())
         disc_task = asyncio.ensure_future(disconnect.wait())
-        await asyncio.wait(
+        done, pending = await asyncio.wait(
             {read_task, disc_task},
             timeout=self.settings.upstream_non_streaming_timeout,
             return_when=asyncio.FIRST_COMPLETED,
         )
-        await cancel_and_await(disc_task)
 
-        if disconnect.is_set() or not read_task.done():
+        # If neither task completed, the read deadline elapsed - the
+        # upstream stalled.  This is a health failure even when the
+        # client also disconnects during cleanup, so it is recorded as
+        # 502 rather than "cancelled".
+        if read_task in pending and disc_task in pending:
             await cancel_and_await(read_task)
+            await cancel_and_await(disc_task)
             await self._close_upstream(resp, ctx, upstream_name, cooldown=True)
-            if disconnect.is_set():
-                self._cancel_telemetry(
-                    wall_start, start, ctx.model, ctx.key_hash,
-                    upstream_name, resp.status, stream=False,
-                )
-                return None
             self._error_telemetry(
                 wall_start, wall_perf, ctx.model, ctx.key_hash,
                 upstream_name, 502, stream=False,
@@ -263,6 +261,18 @@ class Proxy:
                 f"{self.settings.upstream_non_streaming_timeout}s",
                 upstream=upstream_name,
             )
+
+        # Either the body arrived or the client disconnected first.
+        await cancel_and_await(disc_task)
+
+        if disconnect.is_set():
+            await cancel_and_await(read_task)
+            await self._close_upstream(resp, ctx, upstream_name, cooldown=True)
+            self._cancel_telemetry(
+                wall_start, start, ctx.model, ctx.key_hash,
+                upstream_name, resp.status, stream=False,
+            )
+            return None
 
         try:
             content = read_task.result()
