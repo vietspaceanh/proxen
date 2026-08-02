@@ -81,18 +81,18 @@ class StatsBroadcaster:
         cached = self._chart_cache
         if cached["data"] is not None and now - cached["ts"] < _CHART_TTL:
             return
-        tps_ttft, daily_tok, daily_req, cost = await asyncio.gather(
+        tps_ttft, daily_tok, daily_req, daily_cost = await asyncio.gather(
             self._db.tps_ttft_24h(),
             self._db.daily_tokens(30),
             self._db.daily_requests(30),
-            self._db.total_cost(),
+            self._db.daily_cost(30),
         )
         cached["data"] = {
             "tps_ttft_24h": tps_ttft,
             "daily_tokens": daily_tok,
             "daily_requests": daily_req,
         }
-        cached["cost"] = cost
+        cached["cost"] = round(sum(r["cost"] for r in daily_cost), 6)
         cached["ts"] = now
 
     async def get_stats(self) -> dict:
@@ -102,7 +102,7 @@ class StatsBroadcaster:
         await self._refresh_cache()
         return {
             "gate": snapshot.as_dict(),
-            "totals": {**self._writer.totals, "total_cost": self._chart_cache["cost"]},
+            "totals": {**self._writer.totals, "cost_30d": self._chart_cache["cost"]},
             "recent": self._recent_cache,
             "key_map": self._management.key_label_map(),
             "providers": self._upstream_mgr.provider_status(),

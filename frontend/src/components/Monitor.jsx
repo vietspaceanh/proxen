@@ -263,8 +263,8 @@ function MonitorImpl({ stats, theme }) {
           <div className="text-[1.55rem] font-semibold mt-1.5 tracking-tight">{fmtCompact(totals.total_input || 0)} <span className="text-muted-foreground text-[0.95rem] font-normal">/ {fmtCompact(totals.total_output || 0)}</span></div>
           <div className="text-muted-foreground text-[0.72rem] uppercase tracking-wide mt-1">{cachedPct} cached</div>
         </StatCard>
-        <StatCard label="Total Cost">
-          <div className="text-[1.55rem] font-semibold mt-1.5 tracking-tight text-[--accent]">${fmt(totals.total_cost || 0, 2)}</div>
+        <StatCard label="Total Cost (30d)">
+          <div className="text-[1.55rem] font-semibold mt-1.5 tracking-tight text-[--accent]">${fmt(totals.cost_30d || 0, 2)}</div>
         </StatCard>
       </div>
 
