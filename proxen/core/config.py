@@ -68,6 +68,11 @@ health_guard_retry_delay = 5
 # base_url = "https://api.openai.com/v1"
 # api_key = "sk-..."
 # enabled = true
+# max_inflight = 5
+#
+# Optional static headers added to every request to this upstream
+# (client headers with the same name are overridden).
+# extra_headers = { "x-provider-tag" = "value" }
 """
 
 
@@ -110,6 +115,7 @@ class Upstream:
     api_key: SecretStr = field(default_factory=lambda: SecretStr(""))
     enabled: bool = True
     max_inflight: int | None = None
+    extra_headers: dict | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.api_key, str):
@@ -122,6 +128,7 @@ class Upstream:
             "api_key": self.api_key.get_secret_value(),
             "enabled": self.enabled,
             "max_inflight": self.max_inflight,
+            "extra_headers": self.extra_headers,
         }
 
     @classmethod
@@ -132,6 +139,7 @@ class Upstream:
             api_key=SecretStr(d.get("api_key", "")),
             enabled=d.get("enabled", True),
             max_inflight=d.get("max_inflight"),
+            extra_headers=d.get("extra_headers"),
         )
 
 

@@ -106,6 +106,10 @@ async def mock_handler(request: web.Request) -> web.Response:
                     "prompt_tokens_details": {"cached_tokens": 2},
                 },
                 "_echo": {k: v for k, v in body.items() if k not in ("model", "messages", "stream", "stream_options")},
+                "_headers_echo": {
+                    "x-test-extra": request.headers.get("x-test-extra", ""),
+                    "authorization": request.headers.get("Authorization", ""),
+                },
             }
         )
     if path == "/v1/messages":

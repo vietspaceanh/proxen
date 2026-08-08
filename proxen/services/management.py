@@ -210,7 +210,7 @@ class Management:
 
     async def _load_upstreams(self) -> None:
         cur = await self._db.execute("SELECT * FROM upstreams ORDER BY id ASC")
-        self.upstreams = [_from_row(Upstream, r, bool_fields={"enabled"}) for r in await cur.fetchall()]
+        self.upstreams = [_from_row(Upstream, r, bool_fields={"enabled"}, json_fields={"extra_headers"}) for r in await cur.fetchall()]
         self._upstream_index = {u.name: u for u in self.upstreams}
 
     async def _load_keys(self) -> None:
@@ -248,6 +248,7 @@ class Management:
             api_key=data.get("api_key", ""),
             enabled=data.get("enabled", True),
             max_inflight=data.get("max_inflight"),
+            extra_headers=data.get("extra_headers") or None,
         )
         await self._db_upsert_upstream(upstream)
         return _serialize_upstream(upstream)
@@ -259,9 +260,11 @@ class Management:
             return None
         merged = existing.to_dict()
         new_name = data.get("name")
-        for k in ("name", "base_url", "api_key", "enabled", "max_inflight"):
+        for k in ("name", "base_url", "api_key", "enabled", "max_inflight", "extra_headers"):
             if k in data:
                 merged[k] = data[k]
+        if "extra_headers" in merged:
+            merged["extra_headers"] = merged["extra_headers"] or None
         if "base_url" in merged:
             _validate_base_url(merged["base_url"])
         upstream = Upstream.from_dict(merged)
@@ -284,6 +287,7 @@ class Management:
         await _upsert(self._db, "upstreams", "name", {
             **upstream.to_dict(),
             "enabled": int(upstream.enabled),
+            "extra_headers": msgspec.json.encode(upstream.extra_headers).decode() if upstream.extra_headers else None,
             "created_at": now,
             "updated_at": now,
         }, exclude_update=("created_at",))

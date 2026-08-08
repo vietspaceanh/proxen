@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS upstreams (
     api_key TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     max_inflight INTEGER,
+    extra_headers TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );

@@ -478,7 +478,8 @@ function ManageImpl() {
                      <div className="flex items-center gap-1.5">
                        <strong className="mono text-sm">{u.name}</strong>
                        <Badge variant={u.enabled ? "default" : "secondary"}>{u.enabled ? "on" : "off"}</Badge>
-                       {u.max_inflight != null && <span className="text-muted-foreground text-[0.76rem] ml-1">max {u.max_inflight}</span>}
+                        {u.max_inflight != null && <span className="text-muted-foreground text-[0.76rem] ml-1">max {u.max_inflight}</span>}
+                        {u.extra_headers && Object.keys(u.extra_headers).length > 0 && <span className="text-muted-foreground text-[0.76rem] ml-1" title={`${Object.keys(u.extra_headers).join(", ")}`}>+headers</span>}
                      </div>
                      <div className="inline-flex border border-border rounded-md overflow-hidden shrink-0">
                        <Button variant="ghost" size="xs" onClick={() => setModal({ type: "provider", edit: u })}>edit</Button>
@@ -554,6 +555,7 @@ function ProviderModal({ edit, onSave, onClose }) {
   const [apiKey, setApiKey] = useState(edit?.api_key || "");
   const [apiKeyDirty, setApiKeyDirty] = useState(false);
   const [maxInflight, setMaxInflight] = useState(edit?.max_inflight ?? "");
+  const [extraHeaders, setExtraHeaders] = useState(edit?.extra_headers ? JSON.stringify(edit.extra_headers, null, 2) : "");
   const [enabled, setEnabled] = useState(edit?.enabled ?? true);
   const [errors, setErrors] = useState({});
 
@@ -562,10 +564,15 @@ function ProviderModal({ edit, onSave, onClose }) {
     if (!name) e.name = "Name is required";
     if (!edit && !apiKey) e.apiKey = "API key is required";
     if (edit && apiKeyDirty && !apiKey) e.apiKey = "API key is required";
+    let extraHeadersParsed = null;
+    if (extraHeaders.trim()) {
+      try { extraHeadersParsed = JSON.parse(extraHeaders); } catch { e.extraHeaders = "Invalid JSON"; }
+    }
     if (Object.keys(e).length) { setErrors(e); return; }
     const payload = {
       name, base_url: baseUrl, enabled,
       max_inflight: maxInflight ? parseInt(maxInflight) : null,
+      extra_headers: extraHeadersParsed,
     };
     if (!edit || apiKeyDirty) payload.api_key = apiKey;
     onSave(payload, edit?.name || null);
@@ -591,6 +598,17 @@ function ProviderModal({ edit, onSave, onClose }) {
       <UIField>
         <FieldLabel>Max Inflight</FieldLabel>
         <Input type="number" placeholder="unlimited" value={maxInflight} onChange={(e) => setMaxInflight(e.target.value)} />
+      </UIField>
+      <UIField>
+        <FieldLabel>Extra Headers</FieldLabel>
+        <textarea
+          className="flex min-h-[72px] w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm font-mono outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:bg-input/30"
+          placeholder='{"x-provider-tag": "value"}'
+          aria-invalid={!!errors.extraHeaders}
+          value={extraHeaders}
+          onChange={(e) => { setExtraHeaders(e.target.value); if (errors.extraHeaders) setErrors((p) => ({ ...p, extraHeaders: undefined })); }}
+        />
+        {errors.extraHeaders && <FieldError>{errors.extraHeaders}</FieldError>}
       </UIField>
       <Check checked={enabled} onChange={setEnabled}>enabled</Check>
     </FormDialog>

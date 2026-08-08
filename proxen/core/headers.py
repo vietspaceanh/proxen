@@ -22,9 +22,15 @@ def protocol_from_path(path) -> str:
 
 
 def filter_headers(
-    src, provider_key: str | None = None, protocol: str = "openai"
+    src, provider_key: str | None = None, protocol: str = "openai",
+    extra_headers: dict | None = None,
 ) -> dict[str, str]:
-    """Filter headers for forwarding."""
+    """Filter headers for forwarding.
+
+    `extra_headers` are merged last, so configured upstream headers
+    override client-sent headers with the same name (including the
+    injected auth header).
+    """
     out: dict[str, str] = {}
     if hasattr(src, "items"):
         pairs = src.items()
@@ -44,4 +50,6 @@ def filter_headers(
                 out["anthropic-version"] = "2023-06-01"
         else:
             out["Authorization"] = f"Bearer {provider_key}"
+    if extra_headers:
+        out.update(extra_headers)
     return out

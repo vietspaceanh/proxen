@@ -160,6 +160,8 @@ class UpstreamManager:
                 headers = {
                     "Authorization": f"Bearer {upstream.api_key.get_secret_value()}"
                 }
+                if upstream.extra_headers:
+                    headers.update(upstream.extra_headers)
                 resp = await self.request(
                     "GET", url, headers=headers, read_timeout=30.0,
                 )

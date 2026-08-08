@@ -154,6 +154,7 @@ class Router:
         route_body = self.route_body(body_or_payload, ctx.model, route)
         headers = filter_headers(
             ctx.raw_headers, upstream.api_key.get_secret_value(), ctx.protocol,
+            extra_headers=upstream.extra_headers,
         )
         url = self.upstream_url(upstream, ctx.path, ctx.query)
 

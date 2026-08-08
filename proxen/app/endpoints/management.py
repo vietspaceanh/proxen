@@ -21,6 +21,7 @@ class UpstreamIn(msgspec.Struct):
     api_key: str = ""
     enabled: bool = True
     max_inflight: int | None = None
+    extra_headers: dict | None = None
 
 
 class UpstreamUpdateIn(msgspec.Struct):
@@ -29,6 +30,7 @@ class UpstreamUpdateIn(msgspec.Struct):
     api_key: str | None | msgspec.UnsetType = msgspec.UNSET
     enabled: bool | None | msgspec.UnsetType = msgspec.UNSET
     max_inflight: int | None | msgspec.UnsetType = msgspec.UNSET
+    extra_headers: dict | None | msgspec.UnsetType = msgspec.UNSET
 
 
 class KeyIn(msgspec.Struct):
