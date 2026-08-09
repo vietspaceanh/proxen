@@ -603,11 +603,12 @@ function ProviderModal({ edit, onSave, onClose }) {
         <FieldLabel>Extra Headers</FieldLabel>
         <textarea
           className="flex min-h-[72px] w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm font-mono outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:bg-input/30"
-          placeholder='{"x-provider-tag": "value"}'
+          placeholder='{"x-session-id": "$x-client-session"}'
           aria-invalid={!!errors.extraHeaders}
           value={extraHeaders}
           onChange={(e) => { setExtraHeaders(e.target.value); if (errors.extraHeaders) setErrors((p) => ({ ...p, extraHeaders: undefined })); }}
         />
+        <p className="text-muted-foreground text-[0.72rem]">"$&lt;name&gt;" copies a request value: a header (case-insensitive) or model / key / path / stream</p>
         {errors.extraHeaders && <FieldError>{errors.extraHeaders}</FieldError>}
       </UIField>
       <Check checked={enabled} onChange={setEnabled}>enabled</Check>

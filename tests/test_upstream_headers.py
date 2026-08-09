@@ -2,9 +2,39 @@
 from __future__ import annotations
 
 from proxen.core.config import _build_settings
+from proxen.core.headers import resolve_extra_headers
 
 KEY = {"Authorization": "Bearer gw-secret"}
 ADM = {"Authorization": "Bearer admin-secret"}
+
+
+# ─── Template resolution unit tests ──────────────────────────────────
+
+
+def test_resolve_header_template_case_insensitive():
+    src = [(b"X-Client-Session", b"sess-1")]
+    out = resolve_extra_headers({"x-session-id": "$x-client-session"}, src)
+    assert out == {"x-session-id": "sess-1"}
+
+
+def test_resolve_context_value_wins_over_header():
+    src = [(b"model", b"header-model")]
+    out = resolve_extra_headers({"x-m": "$model"}, src, {"model": "ctx-model"})
+    assert out == {"x-m": "ctx-model"}
+
+
+def test_resolve_missing_template_omitted():
+    out = resolve_extra_headers({"a": "$nope"}, [])
+    assert out == {}
+
+
+def test_resolve_mixed_static_and_template():
+    out = resolve_extra_headers({"a": "static", "b": "$nope"}, [])
+    assert out == {"a": "static"}
+
+
+def test_resolve_none_returns_empty():
+    assert resolve_extra_headers(None, []) == {}
 
 
 # ─── Config loading ──────────────────────────────────────────────────
@@ -101,3 +131,51 @@ def test_extra_headers_not_sent_when_unset(app_client):
     )
     assert r.status_code == 200, r.text
     assert r.json()["_headers_echo"]["x-test-extra"] == ""
+
+
+# ─── End-to-end: template passthrough ────────────────────────────────
+
+
+def test_extra_headers_template_from_request_header(app_client):
+    app_client.put(
+        "/api/management/upstreams/mock",
+        json={"extra_headers": {"x-test-extra": "$x-session-affinity"}},
+        headers=ADM,
+    )
+    r = app_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]},
+        headers={**KEY, "x-session-affinity": "sess-abc"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["_headers_echo"]["x-test-extra"] == "sess-abc"
+
+
+def test_extra_headers_template_omitted_when_header_missing(app_client):
+    app_client.put(
+        "/api/management/upstreams/mock",
+        json={"extra_headers": {"x-test-extra": "$x-session-affinity"}},
+        headers=ADM,
+    )
+    r = app_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]},
+        headers=KEY,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["_headers_echo"]["x-test-extra"] == ""
+
+
+def test_extra_headers_template_from_model_context(app_client):
+    app_client.put(
+        "/api/management/upstreams/mock",
+        json={"extra_headers": {"x-test-extra": "$model"}},
+        headers=ADM,
+    )
+    r = app_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]},
+        headers=KEY,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["_headers_echo"]["x-test-extra"] == "gpt-test"

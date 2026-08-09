@@ -73,6 +73,11 @@ health_guard_retry_delay = 5
 # Optional static headers added to every request to this upstream
 # (client headers with the same name are overridden).
 # extra_headers = { "x-provider-tag" = "value" }
+#
+# "$<name>" values copy a value from the request: a header
+# (case-insensitive) or model / key / path / stream. Unresolvable
+# templates are omitted.
+# extra_headers = { "x-session-id" = "$x-client-session" }
 """
 
 

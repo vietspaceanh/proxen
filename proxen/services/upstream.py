@@ -12,6 +12,7 @@ import msgspec
 
 from ..core.config import Settings, Upstream
 from ..core.concurrency import ConcurrencyGate
+from ..core.headers import resolve_extra_headers
 from ..core.health import HealthCheck
 # Apply RST_STREAM monkey-patch at import time.
 from ..core import http2_cancel  # noqa: F401
@@ -161,7 +162,10 @@ class UpstreamManager:
                     "Authorization": f"Bearer {upstream.api_key.get_secret_value()}"
                 }
                 if upstream.extra_headers:
-                    headers.update(upstream.extra_headers)
+                    # No incoming request here, so `$<name>` templates
+                    # (e.g. request-header passthrough) cannot be resolved
+                    # and are skipped; static headers still apply.
+                    headers.update(resolve_extra_headers(upstream.extra_headers))
                 resp = await self.request(
                     "GET", url, headers=headers, read_timeout=30.0,
                 )

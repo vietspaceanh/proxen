@@ -155,6 +155,14 @@ class Router:
         headers = filter_headers(
             ctx.raw_headers, upstream.api_key.get_secret_value(), ctx.protocol,
             extra_headers=upstream.extra_headers,
+            template_values={
+                "model": ctx.model,
+                "key": ctx.key_hash,
+                "path": ctx.path,
+                "query": ctx.query,
+                "stream": "true" if ctx.stream else "false",
+                "protocol": ctx.protocol,
+            },
         )
         url = self.upstream_url(upstream, ctx.path, ctx.query)
 
