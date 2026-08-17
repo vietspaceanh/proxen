@@ -63,6 +63,8 @@ def _run_server(args, settings) -> None:
                 api_key=SecretStr(args.upstream_key or first.api_key.get_secret_value()),
                 enabled=first.enabled,
                 max_inflight=first.max_inflight,
+                extra_headers=first.extra_headers,
+                profile=first.profile,
             )
         overrides["upstreams"] = upstreams
 

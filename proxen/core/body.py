@@ -58,10 +58,10 @@ def _skip_val(body: bytes, i: int, n: int) -> int:
     if c == _Q:
         return _str_end(body, i, n)
     if c in (_LB, _LK):
-        depth = 1
+        stack = [_RB if c == _LB else _RK]
         in_str = esc = False
         i += 1
-        while i < n and depth > 0:
+        while i < n and stack:
             ch = body[i]
             if in_str:
                 if esc:
@@ -73,13 +73,20 @@ def _skip_val(body: bytes, i: int, n: int) -> int:
             elif ch == _Q:
                 in_str = True
             elif ch in (_LB, _LK):
-                depth += 1
+                stack.append(_RB if ch == _LB else _RK)
             elif ch in (_RB, _RK):
-                depth -= 1
+                if ch != stack[-1]:
+                    return n
+                stack.pop()
             i += 1
         return i
+    start = i
     while i < n and body[i] not in _WS and body[i] not in (_CM, _RB, _RK):
         i += 1
+    try:
+        msgspec.json.decode(body[start:i])
+    except (msgspec.DecodeError, ValueError):
+        return n
     return i
 
 
@@ -215,6 +222,103 @@ def patch_field(body: bytes, field: str, new_value: str) -> bytes:
             i += 1
         i = _skip_val(body, i, n)
     return body
+
+
+def _object_members(body: bytes):
+    n = len(body)
+    i = 0
+    while i < n and body[i] in _WS:
+        i += 1
+    if i >= n or body[i] != _LB:
+        return None
+    i += 1
+    members = []
+    after_comma = False
+    while True:
+        while i < n and body[i] in _WS:
+            i += 1
+        if i >= n:
+            return None
+        if body[i] == _RB:
+            if after_comma:
+                return None
+            return members if not body[i + 1:].strip(_WS) else None
+        if body[i] != _Q:
+            return None
+        key_start = i
+        key_end = _str_end(body, i, n)
+        if key_end >= n:
+            return None
+        try:
+            key = msgspec.json.decode(body[key_start:key_end])
+        except (msgspec.DecodeError, ValueError):
+            return None
+        i = key_end
+        while i < n and body[i] in _WS:
+            i += 1
+        if i >= n or body[i] != _C:
+            return None
+        i += 1
+        while i < n and body[i] in _WS:
+            i += 1
+        value_start = i
+        value_end = _skip_val(body, i, n)
+        if value_end <= value_start:
+            return None
+        i = value_end
+        while i < n and body[i] in _WS:
+            i += 1
+        members.append((key, key_start, value_start, value_end))
+        after_comma = False
+        if i >= n:
+            return None
+        if body[i] == _CM:
+            i += 1
+            after_comma = True
+            continue
+        if body[i] == _RB:
+            return members if not body[i + 1:].strip(_WS) else None
+        return None
+
+
+def top_level_value(body: bytes, field: str) -> bytes | None:
+    for key, _, value_start, value_end in _object_members(body) or ():
+        if key == field:
+            return body[value_start:value_end]
+    return None
+
+
+def rewrite_top_level_object(
+    body: bytes,
+    *,
+    replacements: dict[str, bytes] | None = None,
+    remove: set[str] = frozenset(),
+    additions: dict[str, bytes] | None = None,
+) -> bytes:
+    """Rewrite top-level JSON fields without decoding nested values."""
+    members = _object_members(body)
+    if members is None:
+        return body
+    replacements = replacements or {}
+    additions = additions or {}
+    found = {key for key, *_ in members}
+    changed = False
+    out = []
+    for key, key_start, value_start, value_end in members:
+        if key in remove:
+            changed = True
+            continue
+        if key in replacements:
+            value = replacements[key]
+            out.append(body[key_start:value_start] + value)
+            changed = changed or body[value_start:value_end] != value
+            continue
+        out.append(body[key_start:value_end])
+    for key, value in additions.items():
+        if key not in found:
+            out.append(msgspec.json.encode(key) + b":" + value)
+            changed = True
+    return b"{" + b",".join(out) + b"}" if changed else body
 
 
 # ─── merge_extra_body ──────────────────────────────────────────────

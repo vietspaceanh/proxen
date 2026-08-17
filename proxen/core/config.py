@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .upstream_profiles import (
+    COMPATIBLE_PROFILE,
+    OPENAI_RESPONSES_PROFILE,
+)
+
 CONFIG_DIR = Path.home() / ".config" / "proxen"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.toml"
 DEFAULT_DB_NAME = "data.db"
@@ -69,6 +74,7 @@ health_guard_retry_delay = 5
 # api_key = "sk-..."
 # enabled = true
 # max_inflight = 5
+# profile = "compatible"
 #
 # Optional static headers added to every request to this upstream
 # (client headers with the same name are overridden).
@@ -78,6 +84,13 @@ health_guard_retry_delay = 5
 # (case-insensitive) or model / key / path / stream. Unresolvable
 # templates are omitted.
 # extra_headers = { "x-session-id" = "$x-client-session" }
+#
+# ChatGPT subscription access uses the Responses API with browser auth. Start
+# authentication from the management dashboard after creating this upstream.
+# [[upstreams]]
+# name = "chatgpt-plus"
+# profile = "openai-responses"
+# max_inflight = 5
 """
 
 
@@ -113,7 +126,7 @@ def _bootstrap_config_dir() -> Path:
 
 @dataclass
 class Upstream:
-    """A single upstream OpenAI-compatible provider."""
+    """A single upstream provider."""
 
     name: str
     base_url: str = "https://api.openai.com/v1"
@@ -121,10 +134,13 @@ class Upstream:
     enabled: bool = True
     max_inflight: int | None = None
     extra_headers: dict | None = None
+    profile: str = "compatible"
 
     def __post_init__(self) -> None:
         if isinstance(self.api_key, str):
             self.api_key = SecretStr(self.api_key)
+        if self.profile not in {COMPATIBLE_PROFILE, OPENAI_RESPONSES_PROFILE}:
+            raise ValueError(f"unsupported upstream profile: {self.profile}")
 
     def to_dict(self) -> dict:
         return {
@@ -134,6 +150,7 @@ class Upstream:
             "enabled": self.enabled,
             "max_inflight": self.max_inflight,
             "extra_headers": self.extra_headers,
+            "profile": self.profile,
         }
 
     @classmethod
@@ -145,6 +162,7 @@ class Upstream:
             enabled=d.get("enabled", True),
             max_inflight=d.get("max_inflight"),
             extra_headers=d.get("extra_headers"),
+            profile=d.get("profile", COMPATIBLE_PROFILE),
         )
 
 

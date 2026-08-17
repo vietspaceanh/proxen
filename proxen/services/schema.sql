@@ -47,8 +47,19 @@ CREATE TABLE IF NOT EXISTS upstreams (
     enabled INTEGER NOT NULL DEFAULT 1,
     max_inflight INTEGER,
     extra_headers TEXT,
+    profile TEXT NOT NULL DEFAULT 'compatible',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS upstream_auth_tokens (
+    upstream_name TEXT PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    account_id TEXT,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (upstream_name) REFERENCES upstreams(name) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS keys (

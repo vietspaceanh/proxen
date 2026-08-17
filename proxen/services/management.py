@@ -4,19 +4,13 @@ import asyncio
 import time
 from dataclasses import asdict, dataclass, fields
 from functools import wraps
-from urllib.parse import urlparse
 
 import msgspec
 
 from ..core.config import ModelRoute, ProxenModel, Settings, Upstream
 from ..core.security import hash_key, mask_key
+from ..core.upstream_profiles import OPENAI_RESPONSES_PROFILE, validate_profile_url
 from .telemetry import Database
-
-
-def _validate_base_url(url: str) -> None:
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError(f"invalid base_url: {url!r} (must be an http(s) URL)")
 
 
 def _from_row(cls, row, *, bool_fields=frozenset(), json_fields=frozenset()):
@@ -241,14 +235,16 @@ class Management:
     @crud("_load_upstreams")
     async def add_upstream(self, data: dict) -> dict:
         base_url = data.get("base_url", "https://api.openai.com/v1")
-        _validate_base_url(base_url)
+        profile = data.get("profile", "compatible")
+        validate_profile_url(profile, base_url)
         upstream = Upstream(
             name=data["name"],
             base_url=base_url,
-            api_key=data.get("api_key", ""),
+            api_key="" if profile == OPENAI_RESPONSES_PROFILE else data.get("api_key", ""),
             enabled=data.get("enabled", True),
             max_inflight=data.get("max_inflight"),
             extra_headers=data.get("extra_headers") or None,
+            profile=profile,
         )
         await self._db_upsert_upstream(upstream)
         return _serialize_upstream(upstream)
@@ -260,19 +256,49 @@ class Management:
             return None
         merged = existing.to_dict()
         new_name = data.get("name")
-        for k in ("name", "base_url", "api_key", "enabled", "max_inflight", "extra_headers"):
+        for k in (
+            "name", "base_url", "api_key", "enabled", "max_inflight",
+            "extra_headers", "profile",
+        ):
             if k in data:
                 merged[k] = data[k]
         if "extra_headers" in merged:
             merged["extra_headers"] = merged["extra_headers"] or None
-        if "base_url" in merged:
-            _validate_base_url(merged["base_url"])
+        validate_profile_url(merged.get("profile", "compatible"), merged["base_url"])
+        if merged.get("profile") == OPENAI_RESPONSES_PROFILE:
+            merged["api_key"] = ""
         upstream = Upstream.from_dict(merged)
-        if new_name and new_name != name:
-            await self._db.execute("UPDATE model_routes SET upstream_name = ? WHERE upstream_name = ?", (new_name, name))
-            await self._db.execute("UPDATE models_cache SET upstream = ? WHERE upstream = ?", (new_name, name))
-            await self._db.execute("DELETE FROM upstreams WHERE name = ?", (name,))
-        await self._db_upsert_upstream(upstream)
+        renamed = bool(new_name and new_name != name)
+        if renamed and self.get_upstream(new_name) is not None:
+            raise ValueError(f"upstream '{new_name}' already exists")
+        try:
+            await self._db_upsert_upstream(upstream, commit=False)
+            if renamed:
+                await self._db.execute(
+                    "UPDATE model_routes SET upstream_name = ? WHERE upstream_name = ?",
+                    (new_name, name),
+                )
+                await self._db.execute(
+                    "UPDATE models_cache SET upstream = ? WHERE upstream = ?",
+                    (new_name, name),
+                )
+                await self._db.execute(
+                    "UPDATE upstream_auth_tokens SET upstream_name = ? WHERE upstream_name = ?",
+                    (new_name, name),
+                )
+                await self._db.execute("DELETE FROM upstreams WHERE name = ?", (name,))
+            if (
+                existing.profile == OPENAI_RESPONSES_PROFILE
+                and upstream.profile != OPENAI_RESPONSES_PROFILE
+            ):
+                await self._db.execute(
+                    "DELETE FROM upstream_auth_tokens WHERE upstream_name = ?",
+                    (new_name or name,),
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
         return _serialize_upstream(upstream)
 
     @crud("_load_upstreams")
@@ -282,7 +308,7 @@ class Management:
         cur = await self._db.execute_commit("DELETE FROM upstreams WHERE name = ?", (name,))
         return cur.rowcount > 0
 
-    async def _db_upsert_upstream(self, upstream: Upstream) -> None:
+    async def _db_upsert_upstream(self, upstream: Upstream, *, commit: bool = True) -> None:
         now = time.time()
         await _upsert(self._db, "upstreams", "name", {
             **upstream.to_dict(),
@@ -290,7 +316,7 @@ class Management:
             "extra_headers": msgspec.json.encode(upstream.extra_headers).decode() if upstream.extra_headers else None,
             "created_at": now,
             "updated_at": now,
-        }, exclude_update=("created_at",))
+        }, exclude_update=("created_at",), commit=commit)
 
     # ---- Proxen user keys ----------------------------------------------
 

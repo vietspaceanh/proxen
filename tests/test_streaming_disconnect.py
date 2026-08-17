@@ -91,6 +91,9 @@ def _make_proxy(resp, *, ttft_timeout: float = 30.0, upstream_sock_read: float =
     upstream_mgr = MagicMock()
     upstream_mgr.health.should_try.return_value = True
     upstream_mgr.gate.try_provider.return_value = True
+    upstream_mgr.prepare_request = AsyncMock(return_value=(
+        "http://mock/v1/chat/completions", {"Authorization": "Bearer key"}, None,
+    ))
     upstream_mgr.request = AsyncMock(return_value=resp)
 
     sink = MagicMock()

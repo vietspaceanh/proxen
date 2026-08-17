@@ -8,7 +8,12 @@ import httpcore
 import pytest
 
 from proxen.core.config import ModelRoute, SecretStr, Upstream
-from proxen.services.proxy import Proxy, RequestContext, Router
+from proxen.services.proxy import (
+    Proxy,
+    RequestContext,
+    Router,
+    UpstreamAuthUnavailable,
+)
 
 KEY = {"Authorization": "Bearer gw-secret"}
 ADM = {"Authorization": "Bearer admin-secret"}
@@ -21,6 +26,46 @@ def test_health_open(app_client):
     r = app_client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+
+
+def test_browser_responses_upstream_keeps_provider_limit_and_masks_auth_state(app_client):
+    r = app_client.post(
+        "/api/management/upstreams",
+        json={
+            "name": "chatgpt",
+            "profile": "openai-responses",
+            "max_inflight": 2,
+        },
+        headers=ADM,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["profile"] == "openai-responses"
+
+    listed = app_client.get("/api/management/upstreams", headers=ADM)
+    assert listed.status_code == 200
+    chatgpt = next(item for item in listed.json()["data"] if item["name"] == "chatgpt")
+    assert chatgpt["max_inflight"] == 2
+    assert chatgpt["auth_status"]["status"] == "not_connected"
+    assert chatgpt["api_key"] == ""
+
+
+def test_browser_upstream_rename(app_client):
+    r = app_client.post(
+        "/api/management/upstreams",
+        json={
+            "name": "chatgpt-old",
+            "profile": "openai-responses",
+        },
+        headers=ADM,
+    )
+    assert r.status_code == 200, r.text
+    r = app_client.put(
+        "/api/management/upstreams/chatgpt-old",
+        json={"name": "chatgpt-new"},
+        headers=ADM,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "chatgpt-new"
 
 
 # ─── Auth gating ────────────────────────────────────────────────────
@@ -496,14 +541,14 @@ def _proxy():
 def test_upstream_url_strips_v1_for_versioned_bases():
     """The client's /v1 prefix is stripped when the base already carries a
     version segment (/v1, /v4, ...); kept for versionless bases."""
-    from proxen.services.proxy.routing import Router
+    from proxen.core.upstream_profiles import upstream_url
     v1 = Upstream(name="a", base_url="https://api.openai.com/v1")
     v4 = Upstream(name="b", base_url="https://api.z.ai/api/coding/paas/v4")
     bare = Upstream(name="c", base_url="https://gateway.example")
-    assert Router.upstream_url(v1, "/v1/chat/completions", "") == "https://api.openai.com/v1/chat/completions"
-    assert Router.upstream_url(v4, "/v1/chat/completions", "") == "https://api.z.ai/api/coding/paas/v4/chat/completions"
-    assert Router.upstream_url(bare, "/v1/chat/completions", "") == "https://gateway.example/v1/chat/completions"
-    assert Router.upstream_url(v4, "/v1/chat/completions", "stream=true") == "https://api.z.ai/api/coding/paas/v4/chat/completions?stream=true"
+    assert upstream_url(v1, "/v1/chat/completions", "") == "https://api.openai.com/v1/chat/completions"
+    assert upstream_url(v4, "/v1/chat/completions", "") == "https://api.z.ai/api/coding/paas/v4/chat/completions"
+    assert upstream_url(bare, "/v1/chat/completions", "") == "https://gateway.example/v1/chat/completions"
+    assert upstream_url(v4, "/v1/chat/completions", "stream=true") == "https://api.z.ai/api/coding/paas/v4/chat/completions?stream=true"
 
 
 # ─── 4xx fallback ───────────────────────────────────────────────────
@@ -625,6 +670,9 @@ async def test_single_usable_route_bypasses_poisoned_health_guard():
     upstream_mgr.health.should_try.return_value = False
     upstream_mgr.health.should_retry.return_value = False
     upstream_mgr.gate.try_provider.return_value = True
+    upstream_mgr.prepare_request = AsyncMock(return_value=(
+        "http://mock/v1/chat/completions", {"Authorization": "Bearer k"}, None,
+    ))
 
     fake_resp = MagicMock()
     fake_resp.status = 200
@@ -648,6 +696,51 @@ async def test_single_usable_route_bypasses_poisoned_health_guard():
 
     # The lone usable route was attempted despite the poisoned guard.
     upstream_mgr.request.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_auth_unavailable_releases_slot_and_falls_back():
+    browser = Upstream(name="chatgpt", profile="openai-responses")
+    compatible = Upstream(name="mock", base_url="http://mock/v1", api_key="k")
+    management = MagicMock()
+    management.get_upstream.side_effect = lambda name: {
+        "chatgpt": browser,
+        "mock": compatible,
+    }.get(name)
+
+    upstream_mgr = MagicMock()
+    upstream_mgr.gate.try_provider.return_value = True
+    upstream_mgr.health.should_try.return_value = True
+    upstream_mgr.health.should_retry.return_value = False
+
+    async def prepare_request(upstream, ctx, body):
+        if upstream.name == "chatgpt":
+            raise UpstreamAuthUnavailable(
+                "not authenticated", upstream=upstream.name,
+            )
+        return "http://mock/v1/chat/completions", {}, body
+
+    upstream_mgr.prepare_request = AsyncMock(side_effect=prepare_request)
+    response = MagicMock(status=200, headers=[])
+    upstream_mgr.request = AsyncMock(return_value=response)
+
+    router = Router(management, upstream_mgr)
+    ctx = RequestContext(
+        model="gpt-test",
+        path="/v1/responses",
+        routes=[
+            ModelRoute(upstream_name="chatgpt", upstream_model_id="gpt-test"),
+            ModelRoute(upstream_name="mock", upstream_model_id="gpt-test", sort_order=1),
+        ],
+    )
+
+    result = await router.try_routes(
+        ctx, b'{"model":"gpt-test"}', asyncio.Event(), read_timeout=5.0,
+    )
+
+    assert result is not None and result.ok is True
+    assert upstream_mgr.request.await_count == 1
+    upstream_mgr.gate.release_provider.assert_any_call("chatgpt")
 
 
 def test_fallback_uses_each_route_model_id(app_client, mock_upstream):

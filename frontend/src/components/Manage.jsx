@@ -348,6 +348,35 @@ function ManageImpl() {
     const u = await api("GET", "/api/management/upstreams");
     setUpstreams(u.data || []);
   };
+  const startBrowserAuth = async (provider) => {
+    const popup = window.open("about:blank", "_blank");
+    try {
+      const flow = await api("POST", `/api/management/upstreams/${encodeURIComponent(provider.name)}/auth/start`);
+      if (flow.authorization_url && popup) popup.location.href = flow.authorization_url;
+      toast.success("authentication started");
+      let lastStatus = flow.status;
+      for (let i = 0; i < 150; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const status = await api("GET", `/api/management/upstreams/${encodeURIComponent(provider.name)}/auth/status`);
+        if (status.status !== lastStatus) {
+          lastStatus = status.status;
+          await refreshProviders();
+        }
+        if (status.status === "connected") { toast.success("provider authenticated"); return; }
+        if (status.status === "failed") { toast.error(status.error || "authentication failed"); return; }
+      }
+    } catch (e) {
+      popup?.close();
+      toast.error(e.message);
+    }
+  };
+  const revokeBrowserAuth = async (provider) => {
+    try {
+      await api("DELETE", `/api/management/upstreams/${encodeURIComponent(provider.name)}/auth`);
+      toast.success("provider authentication revoked");
+      await refreshProviders();
+    } catch (e) { toast.error(e.message); }
+  };
   const refreshKeys = async () => { const k = await api("GET", "/api/management/keys"); setKeys(k.data || []); };
   const refreshModels = async () => { const m = await api("GET", "/api/management/models"); setModels(m.data || []); };
 
@@ -486,7 +515,20 @@ function ManageImpl() {
                        <Button variant="ghost" size="xs" className="text-destructive" onClick={() => deleteProvider(u.name)}>delete</Button>
                      </div>
                    </div>
-                   <div className="text-muted-foreground mono text-[0.78rem] mt-1 break-all">{u.base_url}</div>
+                    <div className="text-muted-foreground mono text-[0.78rem] mt-1 break-all">
+                      {u.profile === "openai-responses" ? "Responses API · browser auth" : u.base_url}
+                    </div>
+                    {u.profile === "openai-responses" && (
+                      <div className="flex items-center gap-1.5 mt-2">
+                        <Badge variant={u.auth_status?.status === "connected" ? "default" : "secondary"}>
+                          {u.auth_status?.status || "not_connected"}
+                        </Badge>
+                        <Button variant="outline" size="xs" onClick={() => startBrowserAuth(u)}>
+                          {u.auth_status?.status === "connected" ? "reauthenticate" : "sign in"}
+                        </Button>
+                        {u.auth_status?.status === "connected" && <Button variant="ghost" size="xs" onClick={() => revokeBrowserAuth(u)}>revoke</Button>}
+                      </div>
+                    )}
                  </div>
                ))}
            </CardContent>
@@ -551,6 +593,7 @@ export const Manage = ManageImpl;
 
 function ProviderModal({ edit, onSave, onClose }) {
   const [name, setName] = useState(edit?.name || "");
+  const [profile, setProfile] = useState(edit?.profile || "compatible");
   const [baseUrl, setBaseUrl] = useState(edit?.base_url || "https://api.openai.com/v1");
   const [apiKey, setApiKey] = useState(edit?.api_key || "");
   const [apiKeyDirty, setApiKeyDirty] = useState(false);
@@ -562,19 +605,22 @@ function ProviderModal({ edit, onSave, onClose }) {
   const save = () => {
     const e = {};
     if (!name) e.name = "Name is required";
-    if (!edit && !apiKey) e.apiKey = "API key is required";
-    if (edit && apiKeyDirty && !apiKey) e.apiKey = "API key is required";
+    const browserProfile = profile === "openai-responses";
+    if (!browserProfile && !edit && !apiKey) e.apiKey = "API key is required";
+    if (!browserProfile && edit && apiKeyDirty && !apiKey) e.apiKey = "API key is required";
     let extraHeadersParsed = null;
     if (extraHeaders.trim()) {
       try { extraHeadersParsed = JSON.parse(extraHeaders); } catch { e.extraHeaders = "Invalid JSON"; }
     }
     if (Object.keys(e).length) { setErrors(e); return; }
     const payload = {
-      name, base_url: baseUrl, enabled,
+      name, profile, base_url: baseUrl, enabled,
       max_inflight: maxInflight ? parseInt(maxInflight) : null,
       extra_headers: extraHeadersParsed,
     };
-    if (!edit || apiKeyDirty) payload.api_key = apiKey;
+    if (browserProfile) {
+      payload.api_key = "";
+    } else if (!edit || apiKeyDirty) payload.api_key = apiKey;
     onSave(payload, edit?.name || null);
   };
 
@@ -587,19 +633,29 @@ function ProviderModal({ edit, onSave, onClose }) {
         {errors.name && <FieldError>{errors.name}</FieldError>}
       </UIField>
       <UIField>
+        <FieldLabel>Profile</FieldLabel>
+        <Select value={profile} onValueChange={setProfile}>
+          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent position="popper">
+            <SelectItem value="compatible">OpenAI-compatible</SelectItem>
+            <SelectItem value="openai-responses">Responses API + browser auth</SelectItem>
+          </SelectContent>
+        </Select>
+      </UIField>
+      {profile !== "openai-responses" && <UIField>
         <FieldLabel>Base URL</FieldLabel>
         <Input type="text" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-      </UIField>
-      <UIField>
+      </UIField>}
+      {profile !== "openai-responses" && <UIField>
         <FieldLabel>API Key</FieldLabel>
         <Input type="password" aria-invalid={!!errors.apiKey} value={apiKey} onChange={(e) => { setApiKey(e.target.value); setApiKeyDirty(true); if (errors.apiKey) setErrors((p) => ({ ...p, apiKey: undefined })); }} />
         {errors.apiKey && <FieldError>{errors.apiKey}</FieldError>}
-      </UIField>
+      </UIField>}
       <UIField>
         <FieldLabel>Max Inflight</FieldLabel>
         <Input type="number" placeholder="unlimited" value={maxInflight} onChange={(e) => setMaxInflight(e.target.value)} />
       </UIField>
-      <UIField>
+      {profile !== "openai-responses" && <UIField>
         <FieldLabel>Extra Headers</FieldLabel>
         <textarea
           className="flex min-h-[72px] w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm font-mono outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:bg-input/30"
@@ -610,7 +666,8 @@ function ProviderModal({ edit, onSave, onClose }) {
         />
         <p className="text-muted-foreground text-[0.72rem]">"$&lt;name&gt;" copies a request value: a header (case-insensitive) or model / key / path / stream</p>
         {errors.extraHeaders && <FieldError>{errors.extraHeaders}</FieldError>}
-      </UIField>
+      </UIField>}
+      {profile === "openai-responses" && <p className="text-muted-foreground text-[0.78rem]">Sign in with ChatGPT after saving. Tokens are stored by Proxen and refreshed automatically.</p>}
       <Check checked={enabled} onChange={setEnabled}>enabled</Check>
     </FormDialog>
   );

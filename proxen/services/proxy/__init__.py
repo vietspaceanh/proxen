@@ -14,6 +14,8 @@ from .context import (
     NoRoutes,
     ProxyError,
     RequestContext,
+    UpstreamAuthUnavailable,
+    UpstreamProtocolError,
     UpstreamUnavailable,
 )
 from .forwarding import StreamForwarder, speed_metrics
@@ -30,6 +32,8 @@ __all__ = [
     "ModelNotFound",
     "NoRoutes",
     "UpstreamUnavailable",
+    "UpstreamAuthUnavailable",
+    "UpstreamProtocolError",
     "AdmissionError",
     "speed_metrics",
 ]

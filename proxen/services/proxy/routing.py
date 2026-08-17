@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from typing import Any
 
@@ -24,15 +23,22 @@ from ...core.body import (
     merge_extra_body,
     patch_field,
 )
-from ...core.headers import filter_headers, protocol_from_path
-from .context import ModelNotFound, NoRoutes, RequestContext, UpstreamUnavailable
+from ...core.headers import protocol_from_path
+from ...core.upstream_profiles import profile_accepts_path
+from .context import (
+    ModelNotFound,
+    NoRoutes,
+    RequestContext,
+    UpstreamAuthUnavailable,
+    UpstreamProtocolError,
+    UpstreamUnavailable,
+)
 from .forwarding import cancel_and_await, safe_aclose
 from ..upstream import UpstreamManager
 from ..management import Management
 
 log = logging.getLogger(__name__)
 
-_VERSION_RE = re.compile(r"/v\d+$")
 _RETRY_STATUSES = frozenset({401, 403, 404, 408, 410, 429})
 
 
@@ -48,6 +54,7 @@ class RouteResult(msgspec.Struct):
     first_chunk: bytes = b""
     start: float = 0.0
     stream_iter: object = None
+    auth_unavailable: bool = False
 
 
 class Router:
@@ -105,16 +112,6 @@ class Router:
             return patch_field(body_or_payload, "model", route.upstream_model_id)
         return body_or_payload
 
-    @staticmethod
-    def upstream_url(upstream: Upstream, path: str, query: str) -> str:
-        base = upstream.base_url.rstrip("/")
-        if _VERSION_RE.search(base) and path.startswith("/v1/"):
-            path = path[3:]
-        url = base + path
-        if query:
-            url += "?" + query
-        return url
-
     async def release_held(self, held: RouteResult | None) -> None:
         if held is not None and held.resp is not None:
             await safe_aclose(held.resp)
@@ -152,19 +149,17 @@ class Router:
 
         start = time.perf_counter()
         route_body = self.route_body(body_or_payload, ctx.model, route)
-        headers = filter_headers(
-            ctx.raw_headers, upstream.api_key.get_secret_value(), ctx.protocol,
-            extra_headers=upstream.extra_headers,
-            template_values={
-                "model": ctx.model,
-                "key": ctx.key_hash,
-                "path": ctx.path,
-                "query": ctx.query,
-                "stream": "true" if ctx.stream else "false",
-                "protocol": ctx.protocol,
-            },
-        )
-        url = self.upstream_url(upstream, ctx.path, ctx.query)
+        try:
+            url, headers, route_body = await self.upstream_mgr.prepare_request(
+                upstream, ctx, route_body,
+            )
+        except UpstreamAuthUnavailable as exc:
+            log.warning("upstream %s authentication unavailable: %s", upstream.name, exc)
+            self.upstream_mgr.gate.release_provider(upstream.name)
+            return RouteResult(
+                upstream_name=upstream.name,
+                auth_unavailable=True,
+            )
 
         # Header phase: race POST against client disconnect and a
         # per-stream timeout.  httpcore's socket-level read timeout is
@@ -416,15 +411,20 @@ class Router:
         held: RouteResult | None = None
         upstream_name = ""
         full: list[tuple[ModelRoute, Upstream]] = []
+        auth_unavailable = False
 
         healthy: list[tuple[ModelRoute, Upstream]] = []
         probing: list[tuple[ModelRoute, Upstream]] = []
         usable: list[tuple[ModelRoute, Upstream]] = []
+        unsupported = False
         for r in ctx.routes:
             if not r.enabled:
                 continue
             u = self.management.get_upstream(r.upstream_name)
             if u is None or not u.enabled:
+                continue
+            if not profile_accepts_path(u.profile, ctx.path):
+                unsupported = True
                 continue
             usable.append((r, u))
         # With only one usable route there is no alternative to fall back
@@ -452,6 +452,7 @@ class Router:
                 ctx, route, upstream, body_or_payload, held, slot, **kw,
             )
             upstream_name = result.upstream_name
+            auth_unavailable = auth_unavailable or result.auth_unavailable
             if action == "ok":
                 return result
             if action == "disconnect":
@@ -482,6 +483,7 @@ class Router:
                     ctx, route, upstream, body_or_payload, held, slot, **kw,
                 )
                 upstream_name = result.upstream_name
+                auth_unavailable = auth_unavailable or result.auth_unavailable
                 if action == "ok":
                     return result
                 if action == "disconnect":
@@ -495,4 +497,15 @@ class Router:
             held.start = time.perf_counter()
             return held
 
+        if auth_unavailable:
+            raise UpstreamAuthUnavailable(
+                "upstream authentication unavailable",
+                upstream=upstream_name or "none",
+            )
+
+        if unsupported and not usable:
+            raise UpstreamProtocolError(
+                f"upstream profile does not support path '{ctx.path}'",
+                upstream=upstream_name or "none",
+            )
         raise UpstreamUnavailable("upstream unavailable", upstream=upstream_name or "none")

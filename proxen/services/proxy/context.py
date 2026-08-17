@@ -32,8 +32,16 @@ class NoRoutes(ProxyError):
     status: ClassVar[int] = 503
 
 
+class UpstreamProtocolError(ProxyError):
+    status: ClassVar[int] = 400
+
+
 class UpstreamUnavailable(ProxyError):
     status: ClassVar[int] = 502
+
+
+class UpstreamAuthUnavailable(ProxyError):
+    status: ClassVar[int] = 503
 
 
 class AdmissionError(Exception):

@@ -12,14 +12,31 @@ import msgspec
 
 from ..core.config import Settings, Upstream
 from ..core.concurrency import ConcurrencyGate
-from ..core.headers import resolve_extra_headers
+from ..core.headers import filter_headers, resolve_extra_headers
 from ..core.health import HealthCheck
+from ..core.upstream_profiles import (
+    is_responses_profile,
+    normalize_profile_models,
+    prepare_responses_body,
+    profile_models_url,
+    upstream_url,
+)
 # Apply RST_STREAM monkey-patch at import time.
 from ..core import http2_cancel  # noqa: F401
 from .telemetry import Database
 from .management import Management
+from .proxy.context import UpstreamAuthUnavailable
+from .upstream_auth import BrowserAuthService
 
 log = logging.getLogger("proxen.upstream")
+
+
+class ModelSyncError(Exception):
+    """A model catalog refresh failed for an explicitly requested upstream."""
+
+    def __init__(self, upstream: str, message: str) -> None:
+        self.upstream = upstream
+        super().__init__(message)
 
 
 class UpstreamManager:
@@ -47,6 +64,7 @@ class UpstreamManager:
         self._pool = pool
         self._models_cache: dict[str, list[dict]] = {}
         self._on_change: Callable[[], None] | None = None
+        self.auth = BrowserAuthService(db, self.request)
         self.health = HealthCheck(
             failure_threshold=settings.health_guard_failures,
             backoff_base=settings.health_guard_retry_delay,
@@ -123,6 +141,33 @@ class UpstreamManager:
             await asyncio.sleep(0.05)
             return await self.pool.handle_async_request(req)
 
+    async def prepare_request(
+        self, upstream: Upstream, ctx, body: bytes,
+    ) -> tuple[str, dict[str, str], bytes]:
+        """Build url, headers, and (profile-adapted) request body."""
+        headers = filter_headers(
+            ctx.raw_headers,
+            upstream.api_key.get_secret_value(),
+            ctx.protocol,
+            extra_headers=upstream.extra_headers,
+            template_values={
+                "model": ctx.model,
+                "key": ctx.key_hash,
+                "path": ctx.path,
+                "query": ctx.query,
+                "stream": "true" if ctx.stream else "false",
+                "protocol": ctx.protocol,
+            },
+        )
+        if is_responses_profile(upstream.profile):
+            headers.update(await self.auth.headers(upstream))
+        if is_responses_profile(upstream.profile):
+            body = prepare_responses_body(body)
+        return upstream_url(upstream, ctx.path, ctx.query), headers, body
+
+    async def auth_status(self, upstream: Upstream) -> dict:
+        return await self.auth.status(upstream)
+
     def all_enabled(self) -> list[Upstream]:
         return self.management.enabled_upstreams()
 
@@ -157,34 +202,50 @@ class UpstreamManager:
                 )
                 continue
             try:
-                url = f"{upstream.base_url.rstrip('/')}/models"
-                headers = {
-                    "Authorization": f"Bearer {upstream.api_key.get_secret_value()}"
-                }
+                url = profile_models_url(upstream.profile) or f"{upstream.base_url.rstrip('/')}/models"
+                headers = {"Authorization": f"Bearer {upstream.api_key.get_secret_value()}"}
                 if upstream.extra_headers:
                     # No incoming request here, so `$<name>` templates
                     # (e.g. request-header passthrough) cannot be resolved
                     # and are skipped; static headers still apply.
                     headers.update(resolve_extra_headers(upstream.extra_headers))
+                if is_responses_profile(upstream.profile):
+                    headers.update(await self.auth.headers(upstream))
                 resp = await self.request(
                     "GET", url, headers=headers, read_timeout=30.0,
                 )
                 try:
                     if resp.status != 200:
-                        log.warning(
-                            "model sync from %s returned %s", upstream.name, resp.status
+                        raise ModelSyncError(
+                            upstream.name,
+                            f"model catalog returned HTTP {resp.status}",
                         )
-                        continue
                     body = await resp.aread()
                     data = msgspec.json.decode(body)
                 finally:
                     await resp.aclose()
-                models = data.get("data", []) if isinstance(data, dict) else []
+                models = normalize_profile_models(upstream.profile, data)
                 self._models_cache[upstream.name] = models
                 await self.replace_cached_models(upstream.name, models)
                 log.info("synced %d models from %s", len(models), upstream.name)
-            except Exception:
+            except ModelSyncError as exc:
+                log.warning("model sync failed for %s: %s", upstream.name, exc)
+                if upstream_name is not None:
+                    raise
+            except UpstreamAuthUnavailable as exc:
+                log.warning("model sync failed for %s: %s", upstream.name, exc)
+                if upstream_name is not None:
+                    raise ModelSyncError(
+                        upstream.name,
+                        f"model catalog refresh failed: {exc}",
+                    ) from exc
+            except Exception as exc:
                 log.exception("model sync failed for %s", upstream.name)
+                if upstream_name is not None:
+                    raise ModelSyncError(
+                        upstream.name,
+                        f"model catalog refresh failed: {exc}",
+                    ) from exc
             finally:
                 self.gate.release_provider(upstream.name)
         return self.get_models()
@@ -201,6 +262,7 @@ class UpstreamManager:
                 log.exception("model sync loop crashed, will retry next cycle")
 
     async def aclose(self) -> None:
+        await self.auth.aclose()
         if self._pool is not None:
             await self._pool.aclose()
             self._pool = None
@@ -213,10 +275,11 @@ class UpstreamManager:
             return [dict(r) for r in await cur.fetchall()]
 
     async def replace_cached_models(self, upstream: str, models: list[dict]) -> None:
-        if not models:
-            return
         now = time.time()
         await self._db.execute("DELETE FROM models_cache WHERE upstream = ?", (upstream,))
+        if not models:
+            await self._db.commit()
+            return
         rows = [
             (
                 upstream, model.get("id", ""), model.get("object", "model"),

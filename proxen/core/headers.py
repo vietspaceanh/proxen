@@ -23,6 +23,8 @@ _TEMPLATE_PREFIX = "$"
 def protocol_from_path(path) -> str:
     if isinstance(path, (bytes, bytearray)):
         path = path.decode("utf-8", "replace")
+    if path == "/v1/responses":
+        return "responses"
     return "anthropic" if path.startswith("/v1/messages") else "openai"
 
 

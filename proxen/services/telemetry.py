@@ -137,6 +137,9 @@ class Database:
     async def commit(self) -> None:
         await self._conn().commit()
 
+    async def rollback(self) -> None:
+        await self._conn().rollback()
+
     async def _resolve_tags(self, names: set[str]) -> dict[str, int]:
         if not names:
             return {}

@@ -7,7 +7,8 @@ from blacksheep import FromBytes, Response
 
 from ...core.concurrency import ConcurrencyGate, KeyLimits
 from ...services.management import Management
-from ...services.upstream import UpstreamManager
+from ...services.upstream import ModelSyncError, UpstreamManager
+from ...services.upstream_auth import BrowserAuthError
 from ..broadcaster import StatsBroadcaster
 from ..http import error_json, json_response
 from . import delete, get, patch, post, put
@@ -22,6 +23,7 @@ class UpstreamIn(msgspec.Struct):
     enabled: bool = True
     max_inflight: int | None = None
     extra_headers: dict | None = None
+    profile: str = "compatible"
 
 
 class UpstreamUpdateIn(msgspec.Struct):
@@ -31,6 +33,7 @@ class UpstreamUpdateIn(msgspec.Struct):
     enabled: bool | None | msgspec.UnsetType = msgspec.UNSET
     max_inflight: int | None | msgspec.UnsetType = msgspec.UNSET
     extra_headers: dict | None | msgspec.UnsetType = msgspec.UNSET
+    profile: str | None | msgspec.UnsetType = msgspec.UNSET
 
 
 class KeyIn(msgspec.Struct):
@@ -145,8 +148,16 @@ async def update_gate(
 
 
 @get("/api/management/upstreams")
-async def list_upstreams(management: Management) -> Response:
-    return json_response({"data": await management.list_upstreams()})
+async def list_upstreams(
+    management: Management,
+    upstream_mgr: UpstreamManager,
+) -> Response:
+    data = await management.list_upstreams()
+    for item in data:
+        upstream = management.get_upstream(item["name"])
+        if upstream is not None and upstream.profile == "openai-responses":
+            item["auth_status"] = await upstream_mgr.auth_status(upstream)
+    return json_response({"data": data})
 
 
 @post("/api/management/upstreams")
@@ -198,7 +209,50 @@ async def fetch_models(
         await upstream_mgr.sync_models(name)
     except KeyError:
         return error_json(404, f"upstream '{name}' not found")
+    except ModelSyncError as exc:
+        return error_json(502, str(exc))
     return json_response({"data": await management.list_available_models(name)})
+
+
+@post("/api/management/upstreams/{name}/auth/start")
+async def start_upstream_auth(
+    name: str,
+    management: Management,
+    upstream_mgr: UpstreamManager,
+) -> Response:
+    upstream = management.get_upstream(name)
+    if upstream is None:
+        return error_json(404, f"upstream '{name}' not found")
+    try:
+        result = await upstream_mgr.auth.start(upstream)
+    except (ValueError, BrowserAuthError) as exc:
+        status = exc.status if isinstance(exc, BrowserAuthError) else 400
+        return error_json(status, str(exc))
+    return json_response(result)
+
+
+@get("/api/management/upstreams/{name}/auth/status")
+async def upstream_auth_status(
+    name: str,
+    management: Management,
+    upstream_mgr: UpstreamManager,
+) -> Response:
+    upstream = management.get_upstream(name)
+    if upstream is None:
+        return error_json(404, f"upstream '{name}' not found")
+    return json_response(await upstream_mgr.auth_status(upstream))
+
+
+@delete("/api/management/upstreams/{name}/auth")
+async def revoke_upstream_auth(
+    name: str,
+    management: Management,
+    upstream_mgr: UpstreamManager,
+) -> Response:
+    if management.get_upstream(name) is None:
+        return error_json(404, f"upstream '{name}' not found")
+    await upstream_mgr.auth.revoke(name)
+    return json_response({"revoked": name})
 
 
 @get("/api/management/upstreams/{name}/available-models")
