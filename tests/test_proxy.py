@@ -24,7 +24,7 @@ def test_extract_usage_basic():
     u = _extract_usage(obj)
     assert u.input_tokens == 10
     assert u.output_tokens == 4
-    assert u.cached_input_tokens == 0
+    assert u.cached_input_tokens is None
 
 
 def test_extract_usage_cached_tokens():
@@ -39,6 +39,16 @@ def test_extract_usage_cached_tokens():
     assert u.input_tokens == 12
     assert u.cached_input_tokens == 5
     assert u.output_tokens == 2
+
+
+def test_extract_usage_no_cache_info():
+    """Providers without cache reporting (e.g. ollama chat completions) omit
+    prompt_tokens_details; cached_input_tokens must be None, not 0."""
+    obj = {"usage": {"prompt_tokens": 8, "completion_tokens": 3}}
+    u = _extract_usage(obj)
+    assert u.input_tokens == 8
+    assert u.cached_input_tokens is None
+    assert u.output_tokens == 3
 
 
 def test_extract_usage_missing():
@@ -333,6 +343,13 @@ def test_extract_usage_anthropic():
     assert u.input_tokens == 25
     assert u.output_tokens == 15
     assert u.cached_input_tokens == 5
+
+
+def test_extract_usage_anthropic_no_cache_info():
+    obj = {"usage": {"input_tokens": 25, "output_tokens": 15}}
+    u = _extract_usage(obj, "anthropic")
+    assert u.input_tokens == 25
+    assert u.cached_input_tokens is None
 
 
 def test_extract_usage_anthropic_missing_fields():

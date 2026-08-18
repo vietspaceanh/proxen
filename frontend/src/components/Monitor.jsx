@@ -28,13 +28,13 @@ function Latency({ ttft, tps }) {
 }
 
 function Tokens({ inp, out, cached }) {
-  inp = inp || 0; out = out || 0; cached = cached || 0;
+  inp = inp || 0; out = out || 0;
   if (!inp && !out) return <TableCell />;
   const parts = [
     <span style={{ color: "var(--accent)" }}>↑{fmt(inp, 0)}</span>,
     <span style={{ color: "var(--success)" }}>↓{fmt(out, 0)}</span>,
   ];
-  if (inp > 0 && cached > 0) {
+  if (cached != null && inp > 0 && cached > 0) {
     const pct = Math.round((cached / inp) * 100);
     parts.push(<span style={{ color: pct > 50 ? "var(--success)" : "var(--warning)" }}>{pct}%</span>);
   }
@@ -157,6 +157,7 @@ function buildDailyTokensChart(stats, theme) {
   const inputs = dt.map((r) => r.input_tokens || 0);
   const outputs = dt.map((r) => r.output_tokens || 0);
   const cached = dt.map((r) => r.cached_input_tokens || 0);
+  const tracked = dt.map((r) => r.input_tracked ?? (r.input_tokens || 0));
   return {
     data: {
       labels: dt.map((r) => r.day),
@@ -176,9 +177,10 @@ function buildDailyTokensChart(stats, theme) {
                 return [`Input: ${fmt(ctx.dataset._input[ctx.dataIndex], 0)}`, `Output: ${fmt(ctx.dataset._output[ctx.dataIndex], 0)}`];
               }
               if (ctx.dataset.label === "Cached") {
-                const inp = inputs[ctx.dataIndex] || 0;
-                const pct = inp > 0 ? Math.round((ctx.parsed.y / inp) * 100) : 0;
-                return `Cached: ${fmt(ctx.parsed.y, 0)} (${pct}%)`;
+                const inp = tracked[ctx.dataIndex] || 0;
+                return inp > 0
+                  ? `Cached: ${fmt(ctx.parsed.y, 0)} (${Math.round((ctx.parsed.y / inp) * 100)}%)`
+                  : `Cached: ${fmt(ctx.parsed.y, 0)}`;
               }
               return `${ctx.dataset.label}: ${fmt(ctx.parsed.y, 0)}`;
             },
@@ -235,9 +237,9 @@ function MonitorImpl({ stats, theme }) {
   const totals = stats.totals || {};
   const recent = stats.recent || [];
 
-  const inp = totals.total_input || 0;
+  const tracked = totals.total_input_tracked || 0;
   const cached = totals.total_cached || 0;
-  const cachedPct = inp > 0 ? Math.round((cached / inp) * 100) + "%" : "";
+  const cachedPct = tracked > 0 ? Math.round((cached / tracked) * 100) + "%" : "";
 
   const tps = buildTpsChart(stats, theme);
   const dailyTokens = buildDailyTokensChart(stats, theme);

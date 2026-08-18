@@ -17,10 +17,17 @@ _SCHEMA = Path(__file__).parent / "schema.sql"
 
 _COST_EXPR = (
     "round("
-    "MAX(0, r.input_tokens - r.cached_input_tokens) / 1000000.0 * COALESCE(pm.input_per_1m, 0)"
-    " + MAX(0, r.cached_input_tokens) / 1000000.0 * COALESCE(pm.cached_input_per_1m, 0)"
+    "MAX(0, r.input_tokens - COALESCE(r.cached_input_tokens, 0)) / 1000000.0 * COALESCE(pm.input_per_1m, 0)"
+    " + COALESCE(r.cached_input_tokens, 0) / 1000000.0 * COALESCE(pm.cached_input_per_1m, 0)"
     " + MAX(0, r.output_tokens) / 1000000.0 * COALESCE(pm.output_per_1m, 0)"
     ", 6)"
+)
+
+# Input tokens from providers that report cache usage (cached_input_tokens
+# non-NULL). Rows with NULL mean the provider omits cache info entirely, so
+# their input cannot contribute to cache-rate denominators.
+_INPUT_TRACKED = (
+    "COALESCE(SUM(CASE WHEN r.cached_input_tokens IS NOT NULL THEN r.input_tokens END), 0)"
 )
 
 _CTX_JOIN = (
@@ -209,7 +216,9 @@ class Database:
             """SELECT COUNT(*) AS total_requests,
                       COALESCE(SUM(input_tokens), 0) AS total_input,
                       COALESCE(SUM(cached_input_tokens), 0) AS total_cached,
-                      COALESCE(SUM(output_tokens), 0) AS total_output
+                      COALESCE(SUM(output_tokens), 0) AS total_output,
+                      COALESCE(SUM(CASE WHEN cached_input_tokens IS NOT NULL
+                                        THEN input_tokens END), 0) AS total_input_tracked
                FROM requests"""
         ) as cur:
             row = await cur.fetchone()
@@ -261,6 +270,8 @@ class Database:
             """SELECT date(timestamp, 'unixepoch') AS day,
                       SUM(input_tokens) AS input_tokens,
                       SUM(cached_input_tokens) AS cached_input_tokens,
+                      SUM(CASE WHEN cached_input_tokens IS NOT NULL
+                               THEN input_tokens END) AS input_tracked,
                       SUM(output_tokens) AS output_tokens
                FROM requests WHERE timestamp >= ?
                GROUP BY day ORDER BY day ASC""",
@@ -281,6 +292,7 @@ class Database:
                       round(COALESCE(SUM({_COST_EXPR}), 0), 6) AS total_cost,
                       COALESCE(SUM(r.input_tokens), 0) AS total_input,
                       COALESCE(SUM(r.cached_input_tokens), 0) AS total_cached,
+                      {_INPUT_TRACKED} AS total_input_tracked,
                       COALESCE(SUM(r.output_tokens), 0) AS total_output,
                       {_WEIGHTED_TPS} AS avg_tps,
                       COALESCE(AVG(r.ttft_ms), 0) / 1000.0 AS avg_ttft,
@@ -297,6 +309,7 @@ class Database:
                       round(COALESCE(SUM({_COST_EXPR}), 0), 6) AS total_cost,
                       COALESCE(SUM(r.input_tokens), 0) AS total_input,
                       COALESCE(SUM(r.cached_input_tokens), 0) AS total_cached,
+                      {_INPUT_TRACKED} AS total_input_tracked,
                       COALESCE(SUM(r.output_tokens), 0) AS total_output,
                       {_WEIGHTED_TPS} AS avg_tps,
                       COALESCE(AVG(r.ttft_ms), 0) / 1000.0 AS avg_ttft
@@ -373,6 +386,7 @@ class TelemetryWriter:
             "total_input": 0,
             "total_cached": 0,
             "total_output": 0,
+            "total_input_tracked": 0,
         }
 
     async def init_totals(self) -> None:
@@ -444,7 +458,9 @@ class TelemetryWriter:
     def _update_totals(self, record: RequestRecord) -> None:
         self._totals["total_requests"] += 1
         self._totals["total_input"] += record.input_tokens
-        self._totals["total_cached"] += record.cached_input_tokens
+        self._totals["total_cached"] += record.cached_input_tokens or 0
+        if record.cached_input_tokens is not None:
+            self._totals["total_input_tracked"] += record.input_tokens
         self._totals["total_output"] += record.output_tokens
 
     async def _flush_and_update(self, batch: list[RequestRecord]) -> bool:

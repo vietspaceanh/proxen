@@ -13,7 +13,7 @@ class RequestRecord(msgspec.Struct):
     ttft: float = 0.0
     tps: float | None = 0.0
     input_tokens: int = 0
-    cached_input_tokens: int = 0
+    cached_input_tokens: int | None = None
     output_tokens: int = 0
     status: int = 0
     duration: float = 0.0

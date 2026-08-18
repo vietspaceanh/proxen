@@ -116,7 +116,7 @@ function buildCacheChart(models, theme) {
       labels: cs.map((r) => r.model),
       datasets: [
         { label: "Cached", data: cs.map((r) => r.total_cached || 0), backgroundColor: accent2, borderRadius: 3 },
-        { label: "Input", data: cs.map((r) => (r.total_input || 0) - (r.total_cached || 0)), backgroundColor: accent, borderRadius: 3 },
+        { label: "Input", data: cs.map((r) => ((r.total_input_tracked ?? (r.total_input || 0)) - (r.total_cached || 0))), backgroundColor: accent, borderRadius: 3 },
       ],
     },
     options: chartOpts({
@@ -191,9 +191,9 @@ function AnalysisImpl({ stats, theme, active }) {
 
   const breakdown = data?.model_breakdown || [];
   const cacheSummary = breakdown.length ? (() => {
-    const totalIn = breakdown.reduce((s, x) => s + (x.total_input || 0), 0);
+    const totalIn = breakdown.reduce((s, x) => s + (x.total_input_tracked ?? (x.total_input || 0)), 0);
     const totalCached = breakdown.reduce((s, x) => s + (x.total_cached || 0), 0);
-    const pct = totalIn > 0 ? Math.round((totalCached / totalIn) * 100) : 0;
+    const pct = totalIn > 0 ? Math.round((totalCached / totalIn) * 100) : null;
     return { totalIn, totalCached, pct };
   })() : null;
 
@@ -241,9 +241,9 @@ function AnalysisImpl({ stats, theme, active }) {
               </TableHeader>
               <TableBody>
                 {models.map((m) => {
-                  const inp = m.total_input || 0;
+                  const inp = m.total_input_tracked ?? (m.total_input || 0);
                   const cached = m.total_cached || 0;
-                  const cachePct = inp > 0 ? Math.round((cached / inp) * 100) : 0;
+                  const cachePct = inp > 0 ? Math.round((cached / inp) * 100) : null;
                   return (
                     <TableRow key={m.model}>
                       <TableCell className="mono max-w-[220px] truncate font-medium">{m.model}</TableCell>
@@ -252,8 +252,8 @@ function AnalysisImpl({ stats, theme, active }) {
                       <TableCell className="text-right tabular-nums">{fmtCompact(m.total_input)}</TableCell>
                       <TableCell className="text-right tabular-nums">{fmtCompact(m.total_output)}</TableCell>
                       <TableCell className="text-right tabular-nums">
-                        <span style={{ color: cachePct > 50 ? "var(--success)" : cachePct > 0 ? "var(--warning)" : "var(--text-muted)" }}>
-                          {cachePct}%
+                        <span style={{ color: cachePct == null ? "var(--text-muted)" : cachePct > 50 ? "var(--success)" : cachePct > 0 ? "var(--warning)" : "var(--text-muted)" }}>
+                          {cachePct == null ? "—" : `${cachePct}%`}
                         </span>
                       </TableCell>
                       <TableCell className="text-right tabular-nums">{fmtTPS(m.avg_tps)}</TableCell>
@@ -316,9 +316,9 @@ function AnalysisImpl({ stats, theme, active }) {
             </TableHeader>
             <TableBody>
               {keys.map((k, i) => {
-                const inp = k.total_input || 0;
+                const inp = k.total_input_tracked ?? (k.total_input || 0);
                 const cached = k.total_cached || 0;
-                const cachePct = inp > 0 ? Math.round((cached / inp) * 100) : 0;
+                const cachePct = inp > 0 ? Math.round((cached / inp) * 100) : null;
                 return (
                   <TableRow key={k.key_id || "anon-" + i}>
                     <TableCell className="mono font-medium">{resolveUser(k.key_id, keyMap, "—")}</TableCell>
@@ -327,8 +327,8 @@ function AnalysisImpl({ stats, theme, active }) {
                     <TableCell className="text-right tabular-nums">{fmtCompact(k.total_input)}</TableCell>
                     <TableCell className="text-right tabular-nums">{fmtCompact(k.total_output)}</TableCell>
                     <TableCell className="text-right tabular-nums">
-                      <span style={{ color: cachePct > 50 ? "var(--success)" : cachePct > 0 ? "var(--warning)" : "var(--text-muted)" }}>
-                        {cachePct}%
+                      <span style={{ color: cachePct == null ? "var(--text-muted)" : cachePct > 50 ? "var(--success)" : cachePct > 0 ? "var(--warning)" : "var(--text-muted)" }}>
+                        {cachePct == null ? "—" : `${cachePct}%`}
                       </span>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{fmtTPS(k.avg_tps)}</TableCell>
@@ -402,7 +402,7 @@ function AnalysisImpl({ stats, theme, active }) {
           </div>
           {cacheSummary && (
             <div className="flex gap-6 text-sm text-muted-foreground">
-              <span>Overall cache rate: <span style={{ color: cacheSummary.pct > 50 ? "var(--success)" : "var(--warning)" }}>{cacheSummary.pct}%</span></span>
+              <span>Overall cache rate: <span style={{ color: cacheSummary.pct == null ? "var(--text-muted)" : cacheSummary.pct > 50 ? "var(--success)" : "var(--warning)" }}>{cacheSummary.pct == null ? "—" : cacheSummary.pct + "%"}</span></span>
               <span>Cached tokens: <span style={{ color: "var(--accent-2)" }}>{fmtCompact(cacheSummary.totalCached)}</span></span>
                <span>Total input tokens: {fmtCompact(cacheSummary.totalIn)}</span>
             </div>

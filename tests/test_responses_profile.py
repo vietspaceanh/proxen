@@ -67,6 +67,17 @@ def test_responses_usage_json():
     assert usage.output_tokens == 4
 
 
+def test_responses_usage_no_cache_info():
+    """Responses usage without input_tokens_details reports None for cached."""
+    body = json.dumps({
+        "usage": {"input_tokens": 6, "output_tokens": 2},
+    }).encode()
+    usage = parse_json_usage(body, "responses")
+    assert usage.input_tokens == 6
+    assert usage.cached_input_tokens is None
+    assert usage.output_tokens == 2
+
+
 def test_responses_usage_stream_event():
     parser = SSEUsageParser("responses")
     parser.feed(
@@ -80,6 +91,18 @@ def test_responses_usage_stream_event():
     assert usage.input_tokens == 8
     assert usage.cached_input_tokens == 1
     assert usage.output_tokens == 2
+
+
+def test_responses_usage_stream_event_no_cache():
+    parser = SSEUsageParser("responses")
+    parser.feed(
+        b'data: {"type":"response.completed","response":{"usage":'
+        b'{"input_tokens":4,"output_tokens":1}}}\n\n'
+    )
+    usage, found = parser.finalize()
+    assert found is True
+    assert usage.input_tokens == 4
+    assert usage.cached_input_tokens is None
 
 
 def test_responses_usage_stream_event_accepts_crlf_and_split_boundaries():

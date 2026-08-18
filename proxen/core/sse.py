@@ -14,7 +14,7 @@ import msgspec
 @dataclass
 class UsageStats:
     input_tokens: int = 0
-    cached_input_tokens: int = 0
+    cached_input_tokens: int | None = None
     output_tokens: int = 0
 
 
@@ -27,22 +27,30 @@ def _extract_usage(obj: dict, protocol: str = "openai") -> UsageStats:
         usage = {}
     if protocol == "responses":
         details = usage.get("input_tokens_details")
-        cached = details.get("cached_tokens", 0) if isinstance(details, dict) else 0
+        if isinstance(details, dict):
+            cached = details.get("cached_tokens", 0) or 0
+        else:
+            cached = None
         return UsageStats(
             input_tokens=usage.get("input_tokens", 0) or 0,
-            cached_input_tokens=cached or 0,
+            cached_input_tokens=cached,
             output_tokens=usage.get("output_tokens", 0) or 0,
         )
     if protocol == "anthropic":
+        if "cache_read_input_tokens" in usage:
+            cached = usage.get("cache_read_input_tokens", 0) or 0
+        else:
+            cached = None
         return UsageStats(
             input_tokens=usage.get("input_tokens", 0) or 0,
-            cached_input_tokens=usage.get("cache_read_input_tokens", 0) or 0,
+            cached_input_tokens=cached,
             output_tokens=usage.get("output_tokens", 0) or 0,
         )
-    cached = 0
     details = usage.get("prompt_tokens_details")
     if isinstance(details, dict):
         cached = details.get("cached_tokens", 0) or 0
+    else:
+        cached = None
     return UsageStats(
         input_tokens=usage.get("prompt_tokens", 0) or 0,
         cached_input_tokens=cached,
